@@ -1,0 +1,9 @@
+setup.py
+loop_algorithm_to_python_adaptive.egg-info/PKG-INFO
+loop_algorithm_to_python_adaptive.egg-info/SOURCES.txt
+loop_algorithm_to_python_adaptive.egg-info/dependency_links.txt
+loop_algorithm_to_python_adaptive.egg-info/requires.txt
+loop_algorithm_to_python_adaptive.egg-info/top_level.txt
+loop_to_python_adaptive/__init__.py
+loop_to_python_adaptive/api.py
+loop_to_python_adaptive/helpers.py

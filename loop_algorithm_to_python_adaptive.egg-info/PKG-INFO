@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: loop-algorithm-to-python-adaptive
+Version: 0.0.1
+Summary: Adaptive wrapper around loop_to_python_api; currently backed by Sigridtt/LoopAlgorithmToPython.
+Requires-Python: >=3.10
+Requires-Dist: loop_to_python_api @ git+https://github.com/Sigridtt/LoopAlgorithmToPython.git@main
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
