@@ -1,5 +1,9 @@
-import loop_to_python_adaptive.api as api  # replace with your real import
+from pathlib import Path
+import json
 
-print("has get_glucose_effect_velocity:", hasattr(api, "get_glucose_effect_velocity"))
-print("callable:", callable(getattr(api, "get_glucose_effect_velocity", None)))
-print("module file:", api.__file__)
+HERE = Path(__file__).resolve()
+REPO_ROOT = HERE.parent.parent  # loop_to_python_adaptive/ -> repo root
+
+FIXTURE = REPO_ROOT / "python_tests" / "test_files" / "loop_algorithm_input.json"
+loop_input = json.loads(FIXTURE.read_text(encoding="utf-8"))
+print("Loaded fixture:", FIXTURE)
