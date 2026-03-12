@@ -1,3 +1,7 @@
+"""
+TO DO:
+Get true therapy settings 
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,120 +18,315 @@ This module categorises bucketed CGM data points into:
   - UAMGlucoseData  (unannounced meals)
   - ISFGlucoseData  (insulin-sensitivity periods)
   - basalGlucoseData (basal-rate periods)
-
-Uses loop_to_python_api.api.get_active_insulin for IOB calculations,
-mirroring oref0's getIOB call.
 """
+
+
 @dataclass(frozen=True)
 class AutotunePrepConfig:
     """
-    Configuration for preparing inputs to autotune_isf.tune_isf_like_oref0.
+    Therapy settings and oref0 categorization knobs.
+
+    basal_rate   : U/hr  — currentBasal used for UAM/absorbing thresholds
+    isf          : mg/dL per U  (sens in oref0)
+    carb_ratio   : g per U
+    min_5m_carbimpact: 8 // mg/dL per 5m (8 mg/dL/5m corresponds to 24g/hr at a CSF of 4 mg/dL/g (x/5*60/4)) (lib/profile/index.js line 35 in oref0)
+    categorize_uam_as_basal : mirrors oref0 --categorize-uam-as-basal flag
     """
-    action_duration_minutes: int = 300    # DIA assumption 5h for rapid-acting insulin ------------------------------NEED VERIFICATION DUAL HORMONE?
-    peak_activity_minutes: int = 75       # typical peak activity time for rapid-acting insulin; oref0 uses 75m 
-    history_hours: int = 24               # how much historical data to use for autotune
-    step_minutes: int = 5                 # CGM typically reports every 5 min
+    # Therapy settings
+    basal_rate:   float = 1.0  # U/hr — MUST be set to user's actual basal rate;
+                               # oref0 reads this from pump profile schedule, no universal default
+    isf:          float = 50.0 # mg/dL per U — MUST be set to user's actual ISF;
+                               # oref0 uses time-based schedule lookup, no universal default
+                               # (50 matches oref0's example profile)
+    carb_ratio:   float = 10.0 # g per U — MUST be set to user's actual CR;
+                               # oref0 uses time-based schedule lookup, no universal default
+                               # (10 matches oref0's example profile)
 
-    cgm_col: str = "CGM"
-    bgi_col: str = "BGI"
+    # Carb absorption model
+    min_5m_carbimpact: float = 8.0  # mg/dL per 5m (8 mg/dL/5m corresponds to 24g/hr at a CSF of 4 mg/dL/g (x/5*60/4)) (lib/profile/index.js line 35 in oref0)
 
-    # --- oref0-like categorization knobs (simplified) ---
-    # classify points as CSF for X minutes after any announced carb entry
-    meal_exclusion_minutes: int = 240
-    # classify as UAM if deviation > threshold (mg/dL per 5 min)
-    uam_deviation_threshold: float = 6.0
-    # avoid using near-zero BGI points for ISF (prevents ratio explosions)
-    min_bgi_abs_for_isf: float = 0.5
+    # UAM post-processing flag
+    categorize_uam_as_basal: bool = False
+
+    # Column / field names
+    cgm_col:       str = "CGM"
+    bgi_col:       str = "BGI"
+    avg_delta_col: str = "avgDelta"
+    deviation_col: str = "deviation"
+    iob_col:       str = "IOB"
+    cob_col:       str = "COB"
 
 
-def _parse_loop_ts(s: str) -> datetime:
-    # your fixtures use '...Z'; datetime.fromisoformat doesn't parse 'Z' in py<3.11 reliably
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    dt = datetime.fromisoformat(s)
+# Timestamp helper
+def _to_utc(val: Any) -> datetime:
+    """Coerce ISO string, pd.Timestamp, or datetime → UTC-aware datetime."""
+    if isinstance(val, pd.Timestamp):
+        dt = val.to_pydatetime()
+    elif isinstance(val, str):
+        s = val[:-1] + "+00:00" if val.endswith("Z") else val
+        dt = datetime.fromisoformat(s)
+    elif isinstance(val, datetime):
+        dt = val
+    else:
+        raise TypeError(f"Cannot parse timestamp: {val!r}")
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
 
-def _categorize_points_oref0_like(
-    points: list[dict[str, Any]],
+####################
+#    CATEGORIZE    #
+####################
+
+def _categorize_points(
+    points: list[dict],
     *,
     loop_algorithm_input: dict,
     cfg: AutotunePrepConfig,
-) -> dict[str, list[dict[str, Any]]]:
+) -> dict[str, list[dict]]:
     """
-    Simplified oref0-like categorization:
-      - CSF: within meal_exclusion_minutes of announced carbs
-      - UAM: deviation > uam_deviation_threshold
-      - ISF: remaining points with |BGI| >= min_bgi_abs_for_isf
-      - basal: everything else
+    Comparable to oref0's categorize.js 
+    Points must be sorted oldest → newest (ascending date).
+    Each point dict is expected to have at minimum:
+        date, glucose, BGI, avgDelta, deviation, IOB   (all from loop_oref_mapping)
     """
+    # --- Build carb treatment list (newest-first; pop() consumes oldest) ---
     carb_entries = loop_algorithm_input.get("carbEntries", []) or []
-    carb_times = []
+    treatments: list[dict] = []
     for c in carb_entries:
-        if "date" in c and float(c.get("grams", 0) or 0) > 0:
-            carb_times.append(_parse_loop_ts(c["date"]))
-    carb_times.sort()
+        grams = float(c.get("grams", 0) or 0)
+        if grams >= 1 and "date" in c:
+            treatments.append({"carbs": grams, "_ts": _to_utc(c["date"])})
+    treatments.sort(key=lambda t: t["_ts"], reverse=True)  # newest first
 
-    def in_meal_window(t: datetime) -> bool:
-        if not carb_times:
-            return False
-        # find latest carb time <= t
-        # (linear scan is fine for small fixtures; can optimize later)
-        last = None
-        for ct in carb_times:
-            if ct <= t:
-                last = ct
+    # Drop treatments older than the oldest point
+    if points:
+        oldest_ts = _to_utc(points[0]["date"])
+        treatments = [t for t in treatments if t["_ts"] >= oldest_ts]
+
+    # --- oref0 state ---
+    calculating_cr  = False
+    absorbing       = 0
+    uam             = 0
+    meal_cob        = 0.0
+    meal_carbs      = 0.0
+    cr_carbs        = 0.0
+    datum_type      = ""
+
+    cr_initial_iob:       float            = 0.0
+    cr_initial_bg:        float            = 0.0
+    cr_initial_carb_time: Optional[datetime] = None
+
+    CSFGlucoseData:   list[dict] = []
+    ISFGlucoseData:   list[dict] = []
+    basalGlucoseData: list[dict] = []
+    UAMGlucoseData:   list[dict] = []
+    CRData:           list[dict] = []
+
+    isf = cfg.isf
+    current_basal = cfg.basal_rate
+    basal_bgi = round(current_basal * isf / 60 * 5, 2)  # mg/dL/5min
+
+    # --- Main loop: oldest → newest ---
+    for raw_point in points:
+        point  = dict(raw_point)
+        ts     = _to_utc(point["date"])
+        bg_ms  = int(ts.timestamp() * 1000)
+
+        # Consume carb treatments that occurred before this BG timestamp
+        my_carbs = 0.0
+        if treatments:
+            oldest = treatments[-1]
+            if int(oldest["_ts"].timestamp() * 1000) < bg_ms:
+                if oldest["carbs"] >= 1:
+                    meal_cob   += oldest["carbs"]
+                    meal_carbs += oldest["carbs"]
+                    my_carbs    = oldest["carbs"]
+                treatments.pop()
+
+        # Retrieve pre-computed values from point dict
+        bgi       = float(point["BGI"])
+        avg_delta = float(point["avgDelta"])
+        deviation = float(point["deviation"])
+        iob_val   = float(point.get("IOB", 0.0))
+
+        # BG < 80: zero out positive deviations (oref0 behaviour)
+        glucose = point.get("glucose")
+        if glucose is not None and glucose < 80 and deviation > 0:
+            deviation = 0.0
+            point["deviation"] = deviation
+
+        # COB decay
+        if meal_cob > 0:
+            ci       = max(deviation, cfg.min_5m_carbimpact)
+            absorbed = ci * cfg.carb_ratio / isf
+            meal_cob = max(0.0, meal_cob - absorbed)
+
+        # CR tracking (mirrors oref0; feeds CRData but doesn't affect categories)
+        if meal_cob > 0 or calculating_cr:
+            cr_carbs += my_carbs
+            if not calculating_cr:
+                cr_initial_iob       = iob_val
+                cr_initial_bg        = glucose or 0.0
+                cr_initial_carb_time = ts
+
+            if meal_cob > 0:
+                calculating_cr = True
+            elif iob_val > current_basal / 2:
+                calculating_cr = True
             else:
-                break
-        if last is None:
-            return False
-        return t <= last + timedelta(minutes=cfg.meal_exclusion_minutes)
+                cr_end_time    = ts
+                cr_elapsed_min = round((cr_end_time - cr_initial_carb_time).total_seconds() / 60)
+                if cr_elapsed_min >= 60:
+                    CRData.append({
+                        "CRInitialIOB":      cr_initial_iob,
+                        "CRInitialBG":       cr_initial_bg,
+                        "CRInitialCarbTime": cr_initial_carb_time,
+                        "CREndIOB":          iob_val,
+                        "CREndBG":           glucose or 0.0,
+                        "CREndTime":         cr_end_time,
+                        "CRCarbs":           cr_carbs,
+                    })
+                cr_carbs       = 0.0
+                calculating_cr = False
 
-    csf: list[dict[str, Any]] = []
-    uam: list[dict[str, Any]] = []
-    isf: list[dict[str, Any]] = []
-    basal: list[dict[str, Any]] = []
+        ##########################################
+        # Categorization: CSF → UAM → basal/ISF  #
+        ##########################################
+        if meal_cob > 0 or absorbing or meal_carbs > 0:
+            # --- CSF ---
+            if iob_val < current_basal / 2:
+                absorbing = 0
+            elif deviation > 0:
+                absorbing = 1
+            else:
+                absorbing = 0
 
-    for p in points:
-        t = _parse_loop_ts(p["date"]) if isinstance(p["date"], str) else p["date"]
-        bgi = float(p["BGI"])
-        dev = float(p["deviation"])
+            if not absorbing and not meal_cob:
+                meal_carbs = 0.0
 
-        if in_meal_window(t):
-            csf.append(p)
-        elif dev > cfg.uam_deviation_threshold:
-            uam.append(p)
-        elif abs(bgi) >= cfg.min_bgi_abs_for_isf:
-            isf.append(p)
+            if datum_type != "csf":
+                point["mealAbsorption"] = "start"
+            datum_type = "csf"
+            point["mealCarbs"] = meal_carbs
+            CSFGlucoseData.append(point)
+
         else:
-            basal.append(p)
+            if datum_type == "csf" and CSFGlucoseData:
+                CSFGlucoseData[-1]["mealAbsorption"] = "end"
+
+            # --- UAM ---
+            if iob_val > 2 * current_basal or deviation > 6 or uam:
+                uam = 1 if deviation > 0 else 0
+
+                if datum_type != "uam":
+                    point["uamAbsorption"] = "start"
+                datum_type = "uam"
+                UAMGlucoseData.append(point)
+
+            else:
+                # --- Basal vs ISF ---
+                # basalBGI > -4*BGI → basal insulin activity dominates
+                if basal_bgi > -4 * bgi:
+                    datum_type = "basal"
+                    basalGlucoseData.append(point)
+                else:
+                    # Unexplained rise → basal, not ISF
+                    if avg_delta > 0 and avg_delta > -2 * bgi:
+                        datum_type = "basal"
+                        basalGlucoseData.append(point)
+                    else:
+                        datum_type = "ISF"
+                        ISFGlucoseData.append(point)
+
+
+    # Post-processing: UAM redistribution 
+
+    csf_len   = len(CSFGlucoseData)
+    isf_len   = len(ISFGlucoseData)
+    uam_len   = len(UAMGlucoseData)
+    basal_len = len(basalGlucoseData)
+
+    if cfg.categorize_uam_as_basal:
+        basalGlucoseData = basalGlucoseData + UAMGlucoseData
+        UAMGlucoseData   = []
+
+    elif csf_len > 12:
+        # ≥ 1h of carb absorption → assume all meals announced
+        basalGlucoseData = basalGlucoseData + UAMGlucoseData
+        UAMGlucoseData   = []
+
+    else:
+        if 2 * basal_len < uam_len:
+            basalGlucoseData = basalGlucoseData + UAMGlucoseData
+            basalGlucoseData.sort(key=lambda d: float(d["deviation"]))
+            basalGlucoseData = basalGlucoseData[: len(basalGlucoseData) // 2]
+
+        if 2 * isf_len < uam_len and isf_len < 10:
+            ISFGlucoseData = ISFGlucoseData + UAMGlucoseData
+            ISFGlucoseData.sort(key=lambda d: float(d["deviation"]))
+            ISFGlucoseData = ISFGlucoseData[: len(ISFGlucoseData) // 2]
+
+    # Re-measure after UAM redistribution
+    basal_len = len(basalGlucoseData)
+    isf_len   = len(ISFGlucoseData)
+
+    # Too many CSF relative to basal+ISF → promote CSF → ISF
+    if 4 * basal_len + isf_len < csf_len and isf_len < 10:
+        ISFGlucoseData = ISFGlucoseData + CSFGlucoseData
+        CSFGlucoseData = []
 
     return {
-        "ISFGlucoseData": isf,
-        "CSFGlucoseData": csf,
-        "UAMGlucoseData": uam,
-        "basalGlucoseData": basal,
+        "CRData":           CRData,
+        "CSFGlucoseData":   CSFGlucoseData,
+        "ISFGlucoseData":   ISFGlucoseData,
+        "basalGlucoseData": basalGlucoseData,
+        "UAMGlucoseData":   UAMGlucoseData,
     }
+
+
 
 
 def prepare_for_autotune_isf(
     df: pd.DataFrame,
     *,
     loop_algorithm_input: dict,
+    cfg: AutotunePrepConfig = AutotunePrepConfig(),
 ) -> dict[str, Any]:
-    cfg = AutotunePrepConfig()
+    """
+    Main entry point.
 
-    # mapping layer
+    1. Calls loop_oref_mapping.prepare_isf_glucose_data to enrich df with
+       BGI, avgDelta, deviation, and IOB, and to build the point list.
+    2. Runs the oref0-faithful stateful categorizer over those points.
+    """
+    
+
     df2, all_points = prepare_isf_glucose_data(
         df,
         loop_algorithm_input=loop_algorithm_input,
+        basal=cfg.basal_rate,
+        isf=cfg.isf,
+        cr=cfg.carb_ratio,
         cgm_col=cfg.cgm_col,
         bgi_col=cfg.bgi_col,
+        avg_delta_col=cfg.avg_delta_col,
+        deviation_col=cfg.deviation_col,
+        include_iob=True,
+        include_cob=False,
+        iob_col=cfg.iob_col,
+        cob_col=cfg.cob_col,
     )
 
-    buckets = _categorize_points_oref0_like(all_points, loop_algorithm_input=loop_algorithm_input, cfg=cfg)
+    
+    # Sort ascending (oldest → newest) for the stateful loop.
+    all_points.sort(key=lambda p: p["date"])
+
+    buckets = _categorize_points(
+        all_points,
+        loop_algorithm_input=loop_algorithm_input,
+        cfg=cfg,
+    )
 
     return {
         "df": df2,

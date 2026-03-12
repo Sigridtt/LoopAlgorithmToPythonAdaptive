@@ -5,8 +5,10 @@ from typing import Literal
 import pandas as pd
 
 import loop_to_python_adaptive.api as api
-from loop_to_python_api.api import get_prediction_values_and_dates
+import loop_to_python_api.helpers as helpers
 
+from loop_to_python_api.api import get_prediction_values_and_dates, get_active_insulin, get_active_carbs
+   
 AlignMode = Literal["ffill", "nearest", "strict"]
 
 """
@@ -81,26 +83,121 @@ def add_bgi_to_history_df(
     return out
 
 
-#############################
-#   COB (carbs on board)    #
-#############################
-# Option A: not implemented yet.
-# NOTE: loop_to_python_api currently exposes single-value COB ("now"), not a series.
-# To make COB a series, we either:
-#   - implement a simple absorption model in Python, or
-#   - call Swift per timestamp (slow), or
-#   - extend the Swift API to return a COB time series.
-#
-# def add_cob_to_history_df(...): ...
-
-
 ##############################
 #   IOB (INSULIN ON BOARD)   #
 ##############################
-# Option A: not implemented yet (same reasons as COB).
-#
-# def add_iob_to_history_df(...): ...
 
+def add_iob_to_history_df(
+    df: pd.DataFrame,
+    *,
+    loop_algorithm_input: dict,
+    basal: float,
+    isf: float,
+    cr: float,
+    iob_col: str = "IOB",
+    insulin_type: str = "novolog",
+    lookback: int = 72,
+) -> pd.DataFrame:
+    """
+    Adds an IOB (insulin on board, in U) column to the history dataframe.
+
+    Each row's IOB is computed from the `lookback` preceding rows using
+    get_active_insulin from loop_to_python_api. The insulin_type is read
+    from loop_algorithm_input if present, otherwise falls back to the
+    `insulin_type` parameter.
+
+    :param df: DatetimeIndex dataframe with at least 'basal' and 'bolus' columns.
+               If missing, basal is filled from the `basal` parameter and bolus
+               is set to NaN.
+    :param loop_algorithm_input: Full LoopAlgorithm JSON input dict. Used to
+                                 read insulinType if present.
+    :param basal: Basal rate (U/hr) — used if df has no 'basal' column.
+    :param isf: Insulin sensitivity factor (mg/dL per U).
+    :param cr: Carbohydrate ratio (g per U).
+    :param iob_col: Name of the output column. Default: 'IOB'.
+    :param insulin_type: Insulin model to use. Default: 'novolog'.
+    :param lookback: Number of rows (5-min intervals) to include in each IOB
+                     calculation. Default 72 = 6 hours.
+    :return: Copy of df with the IOB column added.
+    """
+
+
+    resolved_insulin_type = loop_algorithm_input.get("insulinType", insulin_type)
+
+    out = _to_utc_index(df)
+    if "basal" not in out.columns:
+        out["basal"] = basal
+    if "bolus" not in out.columns:
+        out["bolus"] = float("nan")
+
+    iobs: list[float] = []
+    for i, ts in enumerate(out.index):
+        start_i   = max(0, i - lookback + 1)
+        sub       = out.iloc[start_i : i + 1]
+        json_data = helpers.get_json_loop_prediction_input_from_df(
+            sub, basal, isf, cr, ts, insulin_type=resolved_insulin_type
+        )
+        iobs.append(float(get_active_insulin(json_data)))
+
+    out[iob_col] = iobs
+    return out
+
+
+#############################
+#   COB (carbs on board)    #
+#############################
+
+def add_cob_to_history_df(
+    df: pd.DataFrame,
+    *,
+    loop_algorithm_input: dict,
+    basal: float,
+    isf: float,
+    cr: float,
+    cob_col: str = "COB",
+    insulin_type: str = "novolog",
+    lookback: int = 72,
+) -> pd.DataFrame:
+    """
+    Adds a COB (carbs on board, in g) column to the history dataframe.
+
+    Each row's COB is computed from the `lookback` preceding rows using
+    get_active_carbs from loop_to_python_api.
+
+    :param df: DatetimeIndex dataframe. Should contain a 'carbs' column with
+               meal entries (NaN between meals). If missing, COB will always
+               be 0.
+    :param loop_algorithm_input: Full LoopAlgorithm JSON input dict. Used to
+                                 read insulinType if present.
+    :param basal: Basal rate (U/hr).
+    :param isf: Insulin sensitivity factor (mg/dL per U).
+    :param cr: Carbohydrate ratio (g per U).
+    :param cob_col: Name of the output column. Default: 'COB'.
+    :param insulin_type: Insulin model to use. Default: 'novolog'.
+    :param lookback: Number of rows (5-min intervals) to look back. Default 72 = 6 hours.
+    :return: Copy of df with the COB column added.
+    """
+
+
+    resolved_insulin_type = loop_algorithm_input.get("insulinType", insulin_type)
+
+    out = _to_utc_index(df)
+    if "basal" not in out.columns:
+        out["basal"] = basal
+    if "bolus" not in out.columns:
+        out["bolus"] = float("nan")
+
+    cobs: list[float] = []
+    for i, ts in enumerate(out.index):
+        start_i   = max(0, i - lookback + 1)
+        sub       = out.iloc[start_i : i + 1]
+        json_data = helpers.get_json_loop_prediction_input_from_df(
+            sub, basal, isf, cr, ts, insulin_type=resolved_insulin_type
+        )
+        cobs.append(float(get_active_carbs(json_data)))
+
+    out[cob_col] = cobs
+    return out
 
 ##################
 #    avgDelta    #
@@ -156,6 +253,10 @@ def add_deviation_to_history_df(
 
 
 
+###########################
+#    PREP For PIPELINE    #
+###########################
+
 
 def build_isf_glucose_data_from_df(
     df: pd.DataFrame,
@@ -164,20 +265,17 @@ def build_isf_glucose_data_from_df(
     bgi_col: str = "BGI",
     avg_delta_col: str = "avgDelta",
     deviation_col: str = "deviation",
+    iob_col: str = "IOB",        # passed through if present
+    cob_col: str = "COB",        # passed through if present
 ) -> list[dict]:
     """
     Builds list of dicts with keys "date", "avgDelta", "BGI", "deviation" for ISF tuning.
     """
     if not isinstance(df.index, pd.DatetimeIndex):
         raise ValueError("df must have a DatetimeIndex.")
-    if cgm_col not in df.columns:
-        raise ValueError(f"df missing {cgm_col!r}")
-    if bgi_col not in df.columns:
-        raise ValueError(f"df missing {bgi_col!r}; call add_bgi_to_history_df first")
-    if avg_delta_col not in df.columns:
-        raise ValueError(f"df missing {avg_delta_col!r}; call add_avg_delta_to_history_df first")
-    if deviation_col not in df.columns:
-        raise ValueError(f"df missing {deviation_col!r}; call add_deviation_to_history_df first")
+    for col in [cgm_col, bgi_col, avg_delta_col, deviation_col]:
+        if col not in df.columns:
+            raise ValueError(f"df missing {col!r}")
 
     idx = df.index
     if idx.tz is None:
@@ -188,21 +286,28 @@ def build_isf_glucose_data_from_df(
     avg_delta_s = pd.to_numeric(df[avg_delta_col], errors="coerce")
     bgi_s = pd.to_numeric(df[bgi_col], errors="coerce")
     dev_s = pd.to_numeric(df[deviation_col], errors="coerce")
+    cgm_s = pd.to_numeric(df[cgm_col], errors="coerce")
+    iob_s = pd.to_numeric(df[iob_col], errors="coerce") if iob_col in df.columns else None
+    cob_s = pd.to_numeric(df[cob_col], errors="coerce") if cob_col in df.columns else None
 
     pts: list[dict] = []
     for i in range(len(df)):
         if pd.isna(avg_delta_s.iat[i]) or pd.isna(bgi_s.iat[i]) or pd.isna(dev_s.iat[i]):
             continue
 
-        ts = idx[i]
-        pts.append(
-            {
-                "date": ts.isoformat(),
-                "avgDelta": float(avg_delta_s.iat[i]),
-                "BGI": float(bgi_s.iat[i]),
-                "deviation": float(dev_s.iat[i]),
-            }
-        )
+        pt: dict = {
+            "date":     idx[i].isoformat(),
+            "glucose":  float(cgm_s.iat[i]) if not pd.isna(cgm_s.iat[i]) else None,
+            "avgDelta": float(avg_delta_s.iat[i]),
+            "BGI":      float(bgi_s.iat[i]),
+            "deviation":float(dev_s.iat[i]),
+        }
+        if iob_s is not None and not pd.isna(iob_s.iat[i]):
+            pt["IOB"] = float(iob_s.iat[i])
+        if cob_s is not None and not pd.isna(cob_s.iat[i]):
+            pt["COB"] = float(cob_s.iat[i])
+
+        pts.append(pt)
 
     return pts
 
@@ -211,8 +316,17 @@ def prepare_isf_glucose_data(
     df: pd.DataFrame,
     *,
     loop_algorithm_input: dict,
+    basal: float,
+    isf: float,
+    cr: float,
     cgm_col: str = "CGM",
     bgi_col: str = "BGI",
+    avg_delta_col: str = "avgDelta",      
+    deviation_col: str = "deviation",     
+    include_iob: bool = True,   
+    include_cob: bool = False,  # <-- (COB not needed by categorizer, but useful for debugging)
+    iob_col: str = "IOB",
+    cob_col: str = "COB",
 ) -> tuple[pd.DataFrame, list[dict]]:
     """
     Add BGI/avgDelta/deviation to df and prepare points for autotune_prep.
@@ -221,11 +335,20 @@ def prepare_isf_glucose_data(
     df2 = add_avg_delta_to_history_df(df2, cgm_col=cgm_col, avg_delta_col="avgDelta", window_points=4)
     df2 = add_deviation_to_history_df(df2, avg_delta_col="avgDelta", bgi_col=bgi_col, deviation_col="deviation")
 
+    if include_iob:
+        df2 = add_iob_to_history_df(df2, loop_algorithm_input=loop_algorithm_input,
+                                    basal=basal, isf=isf, cr=cr, iob_col=iob_col)
+    if include_cob:
+        df2 = add_cob_to_history_df(df2, loop_algorithm_input=loop_algorithm_input,
+                                    basal=basal, isf=isf, cr=cr, cob_col=cob_col)
+
     pts = build_isf_glucose_data_from_df(
         df2,
         cgm_col=cgm_col,
         bgi_col=bgi_col,
-        avg_delta_col="avgDelta",
-        deviation_col="deviation",
+        avg_delta_col= avg_delta_col,
+        deviation_col=deviation_col,
+        iob_col=iob_col,  
+        cob_col=cob_col,   
     )
     return df2, pts
