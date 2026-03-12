@@ -6,19 +6,27 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from loop_to_python_adaptive.loop_bgi import BGIConfig, prepare_isf_glucose_data
+from loop_to_python_adaptive.loop_oref_mapping import prepare_isf_glucose_data
 
+"""
+This module categorises bucketed CGM data points into:
+  - CSFGlucoseData  (meal / carb-absorption)
+  - UAMGlucoseData  (unannounced meals)
+  - ISFGlucoseData  (insulin-sensitivity periods)
+  - basalGlucoseData (basal-rate periods)
 
+Uses loop_to_python_api.api.get_active_insulin for IOB calculations,
+mirroring oref0's getIOB call.
+"""
 @dataclass(frozen=True)
 class AutotunePrepConfig:
     """
     Configuration for preparing inputs to autotune_isf.tune_isf_like_oref0.
     """
-    action_duration_minutes: int = 360
-    peak_activity_minutes: int = 75
-    delay_minutes: int = 10
-    history_hours: int = 16
-    step_minutes: int = 5
+    action_duration_minutes: int = 300    # DIA assumption 5h for rapid-acting insulin ------------------------------NEED VERIFICATION DUAL HORMONE?
+    peak_activity_minutes: int = 75       # typical peak activity time for rapid-acting insulin; oref0 uses 75m 
+    history_hours: int = 24               # how much historical data to use for autotune
+    step_minutes: int = 5                 # CGM typically reports every 5 min
 
     cgm_col: str = "CGM"
     bgi_col: str = "BGI"
@@ -108,42 +116,19 @@ def prepare_for_autotune_isf(
     df: pd.DataFrame,
     *,
     loop_algorithm_input: dict,
-    config: Optional[AutotunePrepConfig] = None,
 ) -> dict[str, Any]:
-    """
-    Prepare inputs for autotune_isf.tune_isf_like_oref0, with oref0-like categorization.
+    cfg = AutotunePrepConfig()
 
-    Returns:
-      {
-        "df": df_with_BGI,
-        "isf_glucose_data": points to use for ISF tuning (ISFGlucoseData),
-        "ISFGlucoseData": ...,
-        "CSFGlucoseData": ...,
-        "UAMGlucoseData": ...,
-        "basalGlucoseData": ...,
-      }
-    """
-    cfg = config or AutotunePrepConfig()
-
-    bgi_cfg = BGIConfig(
-        action_duration_minutes=cfg.action_duration_minutes,
-        peak_activity_minutes=cfg.peak_activity_minutes,
-        delay_minutes=cfg.delay_minutes,
-        step_minutes=cfg.step_minutes,
-        history_hours=cfg.history_hours,
-    )
-
+    # mapping layer
     df2, all_points = prepare_isf_glucose_data(
         df,
         loop_algorithm_input=loop_algorithm_input,
-        config=bgi_cfg,
         cgm_col=cfg.cgm_col,
         bgi_col=cfg.bgi_col,
     )
 
     buckets = _categorize_points_oref0_like(all_points, loop_algorithm_input=loop_algorithm_input, cfg=cfg)
 
-    # Backward compatible: return ISF-only points as isf_glucose_data
     return {
         "df": df2,
         "isf_glucose_data": buckets["ISFGlucoseData"],
