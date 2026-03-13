@@ -1,0 +1,6 @@
+{
+    "isf_schedule":   50.0,
+    "basal_schedule": 1.0,
+    "cr_schedule":    10.0,
+    "insulin_type":   "novolog"
+}

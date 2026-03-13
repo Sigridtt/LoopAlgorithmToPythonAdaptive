@@ -334,3 +334,40 @@ def run_autotune_isf_iterations(
         "isf_history": isf_history,
         "last_result": last_result,
     }
+
+def update_profile_isf(
+    loop_algorithm_input: dict,
+    new_isf_scalar: float,
+) -> dict:
+    """
+    Return a new loop_algorithm_input dict with the ISF updated to new_isf_scalar.
+
+    Called after run_autotune_isf_iterations() to apply the tuned ISF
+    back into the profile for the next simulation epoch.
+
+    The sensitivity schedule shape is preserved — all entries are scaled
+    by the ratio new_isf / current_pump_isf. This mirrors oref0 behaviour:
+    the overall ISF level shifts but the diurnal shape stays intact.
+
+    Parameters
+    ----------
+    loop_algorithm_input : The current loop_algorithm_input dict.
+                           Must contain a "sensitivity" key.
+    new_isf_scalar       : The finalISF from run_autotune_isf_iterations().
+
+    Returns
+    -------
+    A new dict — the original is never mutated.
+    """
+    import copy
+    old_isf = extract_pump_isf(loop_algorithm_input)
+    if old_isf == 0:
+        return loop_algorithm_input
+
+    ratio = new_isf_scalar / old_isf
+
+    updated = copy.deepcopy(loop_algorithm_input)
+    for entry in updated["sensitivity"]:
+        entry["value"] = round(float(entry["value"]) * ratio, 3)
+
+    return updated

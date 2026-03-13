@@ -1,0 +1,6 @@
+{
+    "isf_schedule":   [[0, 45.0], [8, 50.0], [20, 42.0]],
+    "basal_schedule": [[0, 0.8],  [6, 1.2],  [22, 0.9]],
+    "cr_schedule":    10.0,
+    "insulin_type":   "novolog"
+}
