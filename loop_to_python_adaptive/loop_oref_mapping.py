@@ -2,10 +2,7 @@
 This module maps loop data to fit  oref0 autotune format. 
 It takes predictions from Loop Algorithm and computes BGI equivalent
 the dataframe returned has bgi, deviation, avgDelta
-BGI from ExponentialInsulinModel (LoopAlgorithm)
-via insulin_percent_effect_remaining, mirroring oref0's:
-    BGI = -iob.activity * sens * 5
-where iob.activity is the instantaneous insulin activity (U/min).
+
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -93,7 +90,7 @@ def insulin_activity_at(
     return -(per_after - per_before) / (2 * dt)
 
 
-                                  
+'''                                  
 @dataclass(frozen=True)
 class BGIConfig:
     action_duration_minutes: int
@@ -117,6 +114,70 @@ def generate_bgi_series_from_insulin_prediction(loop_algorithm_input: dict) -> p
     # Typically negative during insulin action because predicted glucose is descending.
     bgi = pred.shift(-1) - pred
     return bgi
+'''
+def generate_bgi_series_from_predictions(
+    df: pd.DataFrame,
+    *,
+    json_history: list[dict],
+) -> pd.Series:
+    """
+    Compute BGI(t) = pred(t+5m) - pred(t) using Loop's own predictions.
+
+    Each json snapshot in json_history was built at a specific prediction_start.
+    We call get_prediction_values_and_dates for each snapshot and extract the
+    BGI at the prediction_start timestamp only — this gives us one reliable
+    BGI value per snapshot that is internally consistent with what Loop computed.
+
+    The resulting sparse series is then reindexed onto df's index using
+    forward-fill, which is appropriate because the Loop prediction is valid
+    for the 5-min window starting at prediction_start.
+
+    This is the correct BGI method because:
+      - It uses exactly the same insulin model and dose history that Loop used
+      - It avoids the mismatch between our Python activity model and Loop's
+        internal Swift model
+      - It is consistent with oref0's intent (BGI = expected BG change per 5min
+        from insulin alone)
+    """
+    out = _to_utc_index(df)
+
+    bgi_points: dict[pd.Timestamp, float] = {}
+
+    for json_input in json_history:
+        try:
+            values, dates = get_prediction_values_and_dates(json_input)
+        except Exception:
+            continue
+
+        if not values or not dates:
+            continue
+
+        p_idx = pd.to_datetime(dates, utc=True)
+        pred  = pd.Series(values, index=p_idx, dtype="float64").sort_index()
+
+        # BGI at each prediction point = pred(t+5m) - pred(t)
+        bgi_series = pred.shift(-1) - pred
+
+        # Extract only the value at the prediction_start (first point),
+        # which is the BGI that was valid when this snapshot was taken
+        if len(bgi_series) >= 1:
+            ts  = bgi_series.index[0]
+            val = bgi_series.iloc[0]
+            if not pd.isna(val):
+                bgi_points[ts] = val
+
+    if not bgi_points:
+        # Fallback: return NaN series
+        return pd.Series(float("nan"), index=out.index, dtype="float64")
+
+    sparse = pd.Series(bgi_points, dtype="float64").sort_index()
+
+    # Forward-fill onto df index so every CGM row gets a BGI value
+    combined = sparse.reindex(
+        sparse.index.union(out.index)
+    ).ffill().reindex(out.index)
+
+    return combined
 
 '''
 def generate_bgi_series_from_activity(
@@ -190,7 +251,7 @@ def add_bgi_to_history_df(
     bgi_col: str = "BGI",
     align: AlignMode = "ffill",
     loop_algorithm_input: dict | None = None,
-    
+    json_history: list[dict] | None = None,
 ) -> pd.DataFrame:
     """
     Adds a BGI column to the given history dataframe by generating a BGI series from predictions.
@@ -201,18 +262,20 @@ def add_bgi_to_history_df(
         loop_algorithm_input = api.get_loop_algorithm_input()
     insulin_type = loop_algorithm_input.get("insulinType", "novolog")
 
-    bgi_pred = generate_bgi_series_from_insulin_prediction(loop_algorithm_input)
+    out[bgi_col] = generate_bgi_series_from_predictions(
+            out,
+            json_history=json_history,)
   
 
     # Aligning timestamps needed for bgi from predictions as they are "in the future"
-    if align == "ffill":
-        out[bgi_col] = bgi_pred.reindex(out.index, method="ffill")
-    elif align == "nearest":
-        out[bgi_col] = bgi_pred.reindex(out.index, method="nearest")
-    elif align == "strict":
-        out[bgi_col] = bgi_pred.reindex(out.index)
-    else:
-        raise ValueError("align must be one of: 'ffill', 'nearest', 'strict'.")
+    # if align == "ffill":
+    #     out[bgi_col] = bgi_pred.reindex(out.index, method="ffill")
+    # elif align == "nearest":
+    #     out[bgi_col] = bgi_pred.reindex(out.index, method="nearest")
+    # elif align == "strict":
+    #     out[bgi_col] = bgi_pred.reindex(out.index)
+    # else:
+    #     raise ValueError("align must be one of: 'ffill', 'nearest', 'strict'.")
     
     #bgi using activity model
     # out[bgi_col] = generate_bgi_series_from_activity(

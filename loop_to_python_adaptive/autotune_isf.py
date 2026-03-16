@@ -253,6 +253,7 @@ def run_autotune_isf_iterations(
     loop_algorithm_inputs: list[dict],  # one per window, aligned with df_windows
     n_iterations: int = 1,              # number of passes
     cfg: AutotuneISFConfig = AutotuneISFConfig(),
+    json_history_list: list[list[dict]] | None = None,
 ) -> dict[str, Any]:
     """
     Run ISF autotune for `n_iterations` passes over the data windows.
@@ -307,10 +308,16 @@ def run_autotune_isf_iterations(
             zip(df_windows, loop_algorithm_inputs)
         ):
             print(f"  Window {i + 1}/{len(df_windows)} ...", end=" ", flush=True)
+            window_json_history = (
+            json_history_list[i]
+            if json_history_list is not None and i < len(json_history_list)
+            else None
+            )
             result = prepare_for_autotune_isf(
                 df_window,
                 loop_algorithm_input=loop_input,
                 cfg=prep_cfg,
+                json_history=window_json_history,   # ← ADD
             )
             window_isf_points = result["ISFGlucoseData"]
             all_isf_points.extend(window_isf_points)
