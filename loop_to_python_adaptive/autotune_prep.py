@@ -46,7 +46,7 @@ class AutotunePrepConfig:
     min_5m_carbimpact: float = 8.0  # mg/dL per 5m (8 mg/dL/5m corresponds to 24g/hr at a CSF of 4 mg/dL/g (x/5*60/4)) (lib/profile/index.js line 35 in oref0)
 
     # UAM post-processing flag
-    categorize_uam_as_basal: bool = False
+    categorize_uam_as_basal: bool = True   #    <- testing
 
     # Column / field names
     cgm_col:       str = "CGM"
@@ -330,6 +330,6 @@ def prepare_for_autotune_isf(
 
     return {
         "df": df2,
-        "isf_glucose_data": buckets["ISFGlucoseData"],
+        "ISFGlucoseData": buckets["ISFGlucoseData"],
         **buckets,
     }

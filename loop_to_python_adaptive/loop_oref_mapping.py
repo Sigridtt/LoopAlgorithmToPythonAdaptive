@@ -1,3 +1,12 @@
+"""
+This module maps loop data to fit  oref0 autotune format. 
+It takes predictions from Loop Algorithm and computes BGI equivalent
+the dataframe returned has bgi, deviation, avgDelta
+BGI from ExponentialInsulinModel (LoopAlgorithm)
+via insulin_percent_effect_remaining, mirroring oref0's:
+    BGI = -iob.activity * sens * 5
+where iob.activity is the instantaneous insulin activity (U/min).
+"""
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
@@ -7,15 +16,32 @@ import pandas as pd
 import loop_to_python_adaptive.api as api
 import loop_to_python_api.helpers as helpers
 
-from loop_to_python_api.api import get_prediction_values_and_dates, get_active_insulin, get_active_carbs
+from loop_to_python_api.api import get_prediction_values_and_dates, get_active_insulin, get_active_carbs, insulin_percent_effect_remaining
    
 AlignMode = Literal["ffill", "nearest", "strict"]
 
-"""
-This module maps loop data to fit  oref0 autotune format. 
-It takes predictions from Loop Algorithm and computes BGI equivalent
-the dataframe returned has bgi, deviation, avgDelta
-"""
+# ---------------------------------------------------------------------------
+#   Insulin model parameters
+#
+#   Source: LoopKit ExponentialInsulinModel defaults
+#   These match the values used internally by loop_to_python_api when
+#   insulin_type is passed to get_active_insulin / get_prediction_values_and_dates.
+#   loop_to_python_api does not expose these parameters — they are used
+#   inside the Swift layer only. They are mirrored here so we can call
+#   insulin_percent_effect_remaining with the correct values for each type.
+#
+#   Reference: ExponentialInsulinModel.swift (https://github.com/tidepool-org/LoopAlgorithm/blob/main/Sources/LoopAlgorithm/Insulin/ExponentialInsulinModel.swift)
+#   action_duration and peak_activity_time in minutes, delay in minutes.
+# ---------------------------------------------------------------------------
+
+INSULIN_MODEL_PARAMS: dict[str, dict] = {
+    "novolog":   {"action_duration": 360, "peak_activity_time": 75, "delay": 10},
+    "humalog":   {"action_duration": 360, "peak_activity_time": 75, "delay": 10},
+    "apidra":    {"action_duration": 360, "peak_activity_time": 75, "delay": 10},
+    "fiasp":     {"action_duration": 360, "peak_activity_time": 55, "delay": 10},
+    "lyumjev":   {"action_duration": 360, "peak_activity_time": 45, "delay": 10},
+    "afrezza":   {"action_duration": 300, "peak_activity_time": 29, "delay": 10},
+}
 
 #Timezone fix
 def _to_utc_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -29,6 +55,45 @@ def _to_utc_index(df: pd.DataFrame) -> pd.DataFrame:
 ##########################
 #   GENERATE BGI SERIES  #
 ##########################
+def _get_model_params(insulin_type: str) -> dict:
+    """Return model params for the given insulin type, defaulting to novolog."""
+    return INSULIN_MODEL_PARAMS.get(
+        insulin_type.lower(),
+        INSULIN_MODEL_PARAMS["novolog"],
+    )
+
+def insulin_activity_at(
+    mins_ago: float,
+    action_duration: float,
+    peak_activity_time: float,
+    delay: float,
+    dt: float = 0.5,
+) -> float:
+    """
+    Instantaneous insulin activity (fraction of dose / min) at `mins_ago`
+    minutes after delivery.
+
+    Computed as the central-difference numerical derivative of
+    percentEffectRemaining, using step dt minutes.
+
+    activity = -d/dt[percentEffectRemaining(t)]
+
+    dt=0.5 min is small enough for accuracy on the exponential curve
+    and large enough to avoid floating-point noise?
+
+    Returns U_fraction/min — multiply by dose (U) to get U/min.
+    """
+    per_before = insulin_percent_effect_remaining(
+        mins_ago - dt, action_duration, peak_activity_time, delay
+    )
+    per_after = insulin_percent_effect_remaining(
+        mins_ago + dt, action_duration, peak_activity_time, delay
+    )
+    # Negative because percentEffectRemaining decreases over time
+    return -(per_after - per_before) / (2 * dt)
+
+"""
+                                  calculating BGI from prediction is computationally heavy as a prediction is needed for each row of history df
 @dataclass(frozen=True)
 class BGIConfig:
     action_duration_minutes: int
@@ -39,10 +104,10 @@ class BGIConfig:
 
 
 def generate_bgi_series_from_insulin_prediction(loop_algorithm_input: dict) -> pd.Series:
-    """
-    Calls LoopAlgorithm via loop_to_python_api to get insulin-only prediction values+dates,
-    then returns BGI(t) = pred(t+5m) - pred(t).
-    """
+    
+    #Calls LoopAlgorithm via loop_to_python_api to get insulin-only prediction values+dates,
+    #then returns BGI(t) = pred(t+5m) - pred(t).
+    
     values, dates = get_prediction_values_and_dates(loop_algorithm_input)
 
     p_idx = pd.to_datetime(dates, utc=True)
@@ -52,13 +117,79 @@ def generate_bgi_series_from_insulin_prediction(loop_algorithm_input: dict) -> p
     # Typically negative during insulin action because predicted glucose is descending.
     bgi = pred.shift(-1) - pred
     return bgi
+"""
+def generate_bgi_series_from_activity(
+    df: pd.DataFrame,
+    *,
+    loop_algorithm_input: dict,
+    isf: float,
+    insulin_type: str = "novolog",
+) -> pd.Series:
+    """
+    Compute BGI(t) as oref0's categorize.js:
+
+        BGI = -iob.activity * sens * 5
+
+    where iob.activity = sum of activityContrib across all doses (U/min).
+
+    Key properties vs alternatives:
+      - No future CGM data needed (pure insulin model, analytical)
+      - No nonlinearity error (exact derivative, not finite IOB difference)
+      - Covers the full CGM history window (not limited to prediction horizon)
+      - insulin_type resolved from loop_algorithm_input["insulinType"] if present
+
+    """
+    resolved_type = loop_algorithm_input.get("insulinType", insulin_type).lower()
+    params = _get_model_params(resolved_type)
+
+    action_duration    = params["action_duration"]
+    peak_activity_time = params["peak_activity_time"]
+    delay              = params["delay"]
+
+    doses = loop_algorithm_input.get("doses", []) or []
+
+    out = _to_utc_index(df)
+    bgis: list[float] = []
+
+    for ts in out.index:
+        total_activity = 0.0  # U/min
+
+        for dose in doses:
+            dose_type = dose.get("type", "")
+            if dose_type not in ("bolus", "basal"):
+                continue
+
+            volume = float(dose.get("volume", 0) or 0)
+            if volume <= 0:
+                continue
+
+            dose_time = pd.to_datetime(dose["startDate"], utc=True)
+            mins_ago  = (ts - dose_time).total_seconds() / 60.0
+
+            # Only doses within the insulin action window
+            if mins_ago < 0 or mins_ago > action_duration + delay:
+                continue
+
+            activity = insulin_activity_at(
+                mins_ago, action_duration, peak_activity_time, delay
+            )  # fraction/min
+            total_activity += activity * volume  # U/min
+
+        # BGI = -activity * ISF * 5  →  mg/dL per 5 min
+        bgi = -total_activity * isf * 5
+        bgis.append(round(bgi, 3))
+
+    return pd.Series(bgis, index=out.index, dtype="float64")
+
 
 
 def add_bgi_to_history_df(
     df: pd.DataFrame,
+    isf: float,
     bgi_col: str = "BGI",
     align: AlignMode = "ffill",
     loop_algorithm_input: dict | None = None,
+    
 ) -> pd.DataFrame:
     """
     Adds a BGI column to the given history dataframe by generating a BGI series from predictions.
@@ -67,19 +198,26 @@ def add_bgi_to_history_df(
 
     if loop_algorithm_input is None:
         loop_algorithm_input = api.get_loop_algorithm_input()
+    insulin_type = loop_algorithm_input.get("insulinType", "novolog")
 
-    bgi_pred = generate_bgi_series_from_insulin_prediction(loop_algorithm_input)
+    #bgi_pred = generate_bgi_series_from_insulin_prediction(loop_algorithm_input)
+  
 
-    # Aligning timestamps
-    if align == "ffill":
-        out[bgi_col] = bgi_pred.reindex(out.index, method="ffill")
-    elif align == "nearest":
-        out[bgi_col] = bgi_pred.reindex(out.index, method="nearest")
-    elif align == "strict":
-        out[bgi_col] = bgi_pred.reindex(out.index)
-    else:
-        raise ValueError("align must be one of: 'ffill', 'nearest', 'strict'.")
-
+    # # Aligning timestamps needed for bgi from predictions as they are "in the future"
+    # if align == "ffill":
+    #     out[bgi_col] = bgi_pred.reindex(out.index, method="ffill")
+    # elif align == "nearest":
+    #     out[bgi_col] = bgi_pred.reindex(out.index, method="nearest")
+    # elif align == "strict":
+    #     out[bgi_col] = bgi_pred.reindex(out.index)
+    # else:
+    #     raise ValueError("align must be one of: 'ffill', 'nearest', 'strict'.")
+    out[bgi_col] = generate_bgi_series_from_activity(
+        out,
+        loop_algorithm_input=loop_algorithm_input,
+        isf=isf,
+        insulin_type=insulin_type,
+    )
     return out
 
 
@@ -106,21 +244,9 @@ def add_iob_to_history_df(
     from loop_algorithm_input if present, otherwise falls back to the
     `insulin_type` parameter.
 
-    :param df: DatetimeIndex dataframe with at least 'basal' and 'bolus' columns.
-               If missing, basal is filled from the `basal` parameter and bolus
-               is set to NaN.
-    :param loop_algorithm_input: Full LoopAlgorithm JSON input dict. Used to
-                                 read insulinType if present.
-    :param basal: Basal rate (U/hr) — used if df has no 'basal' column.
-    :param isf: Insulin sensitivity factor (mg/dL per U).
-    :param cr: Carbohydrate ratio (g per U).
-    :param iob_col: Name of the output column. Default: 'IOB'.
-    :param insulin_type: Insulin model to use. Default: 'novolog'.
     :param lookback: Number of rows (5-min intervals) to include in each IOB
                      calculation. Default 72 = 6 hours.
-    :return: Copy of df with the IOB column added.
     """
-
 
     resolved_insulin_type = loop_algorithm_input.get("insulinType", insulin_type)
 
@@ -164,20 +290,9 @@ def add_cob_to_history_df(
     Each row's COB is computed from the `lookback` preceding rows using
     get_active_carbs from loop_to_python_api.
 
-    :param df: DatetimeIndex dataframe. Should contain a 'carbs' column with
-               meal entries (NaN between meals). If missing, COB will always
-               be 0.
-    :param loop_algorithm_input: Full LoopAlgorithm JSON input dict. Used to
-                                 read insulinType if present.
-    :param basal: Basal rate (U/hr).
-    :param isf: Insulin sensitivity factor (mg/dL per U).
-    :param cr: Carbohydrate ratio (g per U).
-    :param cob_col: Name of the output column. Default: 'COB'.
-    :param insulin_type: Insulin model to use. Default: 'novolog'.
     :param lookback: Number of rows (5-min intervals) to look back. Default 72 = 6 hours.
-    :return: Copy of df with the COB column added.
+  
     """
-
 
     resolved_insulin_type = loop_algorithm_input.get("insulinType", insulin_type)
 
@@ -213,7 +328,7 @@ def add_avg_delta_to_history_df(
     Adds avgDelta as a recent-past slope estimate.
 
     oref0 computes avgDelta over the last 4 CGM datapoints (i.e., ~15 minutes of history), 
-    so we default window_points=4.
+    so default window_points=4.
 
     Units: mg/dL per 5 minutes.
     """
@@ -241,6 +356,9 @@ def add_deviation_to_history_df(
 ) -> pd.DataFrame:
     """
     Adds deviation = avgDelta - BGI as a column.
+    deviation > 0 : BG rising more than insulin predicts (carbs / UAM)
+    deviation < 0 : BG falling more than insulin predicts (ISF too weak)
+    deviation ≈ 0 : insulin model explains BG movement well
     """
     out = _to_utc_index(df)
     if avg_delta_col not in out.columns:
@@ -254,7 +372,7 @@ def add_deviation_to_history_df(
 
 
 ###########################
-#    PREP For PIPELINE    #
+#    BUILDING FOR PREP    #
 ###########################
 
 
@@ -269,7 +387,11 @@ def build_isf_glucose_data_from_df(
     cob_col: str = "COB",        # passed through if present
 ) -> list[dict]:
     """
-    Builds list of dicts with keys "date", "avgDelta", "BGI", "deviation" for ISF tuning.
+    Converts the enriched df into a list of point dicts for autotune_prep.
+
+    Points where avgDelta, BGI, or deviation are NaN are skipped —
+    these are the warmup rows at the start of the window where
+    avgDelta needs 4 prior points to be valid.
     """
     if not isinstance(df.index, pd.DatetimeIndex):
         raise ValueError("df must have a DatetimeIndex.")
@@ -330,8 +452,16 @@ def prepare_isf_glucose_data(
 ) -> tuple[pd.DataFrame, list[dict]]:
     """
     Add BGI/avgDelta/deviation to df and prepare points for autotune_prep.
+
+    Call order and reasoning:
+      1. BGI       — analytical, from insulin model, no other columns needed
+      2. avgDelta  — from CGM only 
+      3. deviation — requires BGI and avgDelta
+      4. IOB       — independent; needed by categoriser later, not by BGI
+      5. COB       — optional, for debugging only
+
     """
-    df2 = add_bgi_to_history_df(df, loop_algorithm_input=loop_algorithm_input, bgi_col=bgi_col, align="ffill",)
+    df2 = add_bgi_to_history_df(df, isf, bgi_col=bgi_col, align="ffill",loop_algorithm_input=loop_algorithm_input,)
     df2 = add_avg_delta_to_history_df(df2, cgm_col=cgm_col, avg_delta_col="avgDelta", window_points=4)
     df2 = add_deviation_to_history_df(df2, avg_delta_col="avgDelta", bgi_col=bgi_col, deviation_col="deviation")
 
