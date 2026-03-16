@@ -92,8 +92,8 @@ def insulin_activity_at(
     # Negative because percentEffectRemaining decreases over time
     return -(per_after - per_before) / (2 * dt)
 
-"""
-                                  calculating BGI from prediction is computationally heavy as a prediction is needed for each row of history df
+
+                                  
 @dataclass(frozen=True)
 class BGIConfig:
     action_duration_minutes: int
@@ -117,7 +117,8 @@ def generate_bgi_series_from_insulin_prediction(loop_algorithm_input: dict) -> p
     # Typically negative during insulin action because predicted glucose is descending.
     bgi = pred.shift(-1) - pred
     return bgi
-"""
+
+'''
 def generate_bgi_series_from_activity(
     df: pd.DataFrame,
     *,
@@ -181,7 +182,7 @@ def generate_bgi_series_from_activity(
 
     return pd.Series(bgis, index=out.index, dtype="float64")
 
-
+'''
 
 def add_bgi_to_history_df(
     df: pd.DataFrame,
@@ -200,24 +201,26 @@ def add_bgi_to_history_df(
         loop_algorithm_input = api.get_loop_algorithm_input()
     insulin_type = loop_algorithm_input.get("insulinType", "novolog")
 
-    #bgi_pred = generate_bgi_series_from_insulin_prediction(loop_algorithm_input)
+    bgi_pred = generate_bgi_series_from_insulin_prediction(loop_algorithm_input)
   
 
-    # # Aligning timestamps needed for bgi from predictions as they are "in the future"
-    # if align == "ffill":
-    #     out[bgi_col] = bgi_pred.reindex(out.index, method="ffill")
-    # elif align == "nearest":
-    #     out[bgi_col] = bgi_pred.reindex(out.index, method="nearest")
-    # elif align == "strict":
-    #     out[bgi_col] = bgi_pred.reindex(out.index)
-    # else:
-    #     raise ValueError("align must be one of: 'ffill', 'nearest', 'strict'.")
-    out[bgi_col] = generate_bgi_series_from_activity(
-        out,
-        loop_algorithm_input=loop_algorithm_input,
-        isf=isf,
-        insulin_type=insulin_type,
-    )
+    # Aligning timestamps needed for bgi from predictions as they are "in the future"
+    if align == "ffill":
+        out[bgi_col] = bgi_pred.reindex(out.index, method="ffill")
+    elif align == "nearest":
+        out[bgi_col] = bgi_pred.reindex(out.index, method="nearest")
+    elif align == "strict":
+        out[bgi_col] = bgi_pred.reindex(out.index)
+    else:
+        raise ValueError("align must be one of: 'ffill', 'nearest', 'strict'.")
+    
+    #bgi using activity model
+    # out[bgi_col] = generate_bgi_series_from_activity(
+    #     out,
+    #     loop_algorithm_input=loop_algorithm_input,
+    #     isf=isf,
+    #     insulin_type=insulin_type,
+    # )
     return out
 
 
