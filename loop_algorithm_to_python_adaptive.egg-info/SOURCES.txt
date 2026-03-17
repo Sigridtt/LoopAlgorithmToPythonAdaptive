@@ -6,4 +6,10 @@ loop_algorithm_to_python_adaptive.egg-info/requires.txt
 loop_algorithm_to_python_adaptive.egg-info/top_level.txt
 loop_to_python_adaptive/__init__.py
 loop_to_python_adaptive/api.py
+loop_to_python_adaptive/autosense_isf.py
+loop_to_python_adaptive/autotune_isf.py
+loop_to_python_adaptive/autotune_prep.py
 loop_to_python_adaptive/helpers.py
+loop_to_python_adaptive/loop_oref_mapping.py
+loop_to_python_adaptive/sandbox.py
+tests/test_pipeline.py
