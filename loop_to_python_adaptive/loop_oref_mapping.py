@@ -139,7 +139,11 @@ def generate_bgi_series_from_predictions(
       - It is consistent with oref0's intent (BGI = expected BG change per 5min
         from insulin alone)
     """
+    # In generate_bgi_series_from_predictions, add this as the first line after `out = _to_utc_index(df)`:
+    
     out = _to_utc_index(df)
+    if not json_history:
+        return pd.Series(float("nan"), index=out.index, dtype="float64")
 
     bgi_points: dict[pd.Timestamp, float] = {}
 

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
-
+from loop_to_python_adaptive.autotune_prep import (AutotunePrepConfig, prepare_for_autotune_isf, )
 
 @dataclass(frozen=True)
 class AutotuneISFConfig:
@@ -251,6 +251,8 @@ def run_autotune_isf_iterations(
     df_windows: list,                   # list of pd.DataFrames, one per day
     *,
     loop_algorithm_inputs: list[dict],  # one per window, aligned with df_windows
+    pump_isf: float | None = None,      # original pump ISF, never changes
+    isf_current: float | None = None,   # yesterday's tuned ISF, carries forward
     n_iterations: int = 1,              # number of passes
     cfg: AutotuneISFConfig = AutotuneISFConfig(),
     json_history_list: list[list[dict]] | None = None,
@@ -279,13 +281,16 @@ def run_autotune_isf_iterations(
         isf_history  : List of ISF values after each iteration (length = n_iterations).
         last_result  : Full result dict from the final tune_isf() call.
     """
-    from loop_to_python_adaptive.autotune_prep import (
-        AutotunePrepConfig,
-        prepare_for_autotune_isf,
-    )
-    pump_isf = extract_pump_isf(loop_algorithm_inputs[0])
+
+    # pump_isf is the unchanging anchor for safety caps
+    if pump_isf is None:
+        pump_isf = extract_pump_isf(loop_algorithm_inputs[0])
     pump_basal = extract_pump_basal(loop_algorithm_inputs[0])
     pump_cr = extract_pump_cr(loop_algorithm_inputs[0])
+
+    # isf_current is what we tune from — starts at pump_isf on day 1
+    if isf_current is None:
+        isf_current = pump_isf   
 
     isf_current = pump_isf
     isf_history: list[float] = []
@@ -313,6 +318,10 @@ def run_autotune_isf_iterations(
             if json_history_list is not None and i < len(json_history_list)
             else None
             )
+            carb_entries = loop_input.get("carbEntries", [])
+            print(f"    carb entries in loop_input: {len(carb_entries)}")
+            if carb_entries:
+                print(f"    first: {carb_entries[0]}")
             result = prepare_for_autotune_isf(
                 df_window,
                 loop_algorithm_input=loop_input,
@@ -322,6 +331,7 @@ def run_autotune_isf_iterations(
             window_isf_points = result["ISFGlucoseData"]
             all_isf_points.extend(window_isf_points)
             print(f"{len(window_isf_points)} ISF points")
+            print(f"    CSF={len(result['CSFGlucoseData'])} ISF={len(result['ISFGlucoseData'])} basal={len(result['basalGlucoseData'])} UAM={len(result['UAMGlucoseData'])}")
 
         print(f"  Total ISF points this iteration: {len(all_isf_points)}")
 
