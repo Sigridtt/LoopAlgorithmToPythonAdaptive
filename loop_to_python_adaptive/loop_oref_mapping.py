@@ -515,6 +515,7 @@ def prepare_isf_glucose_data(
     include_cob: bool = False,  # <-- (COB not needed by categorizer, but useful for debugging)
     iob_col: str = "IOB",
     cob_col: str = "COB",
+    json_history: list[dict] | None = None,
 ) -> tuple[pd.DataFrame, list[dict]]:
     """
     Add BGI/avgDelta/deviation to df and prepare points for autotune_prep.
@@ -527,7 +528,7 @@ def prepare_isf_glucose_data(
       5. COB       — optional, for debugging only
 
     """
-    df2 = add_bgi_to_history_df(df, isf, bgi_col=bgi_col, align="ffill",loop_algorithm_input=loop_algorithm_input,)
+    df2 = add_bgi_to_history_df(df, isf, bgi_col=bgi_col, align="ffill",loop_algorithm_input=loop_algorithm_input,json_history=json_history,)
     df2 = add_avg_delta_to_history_df(df2, cgm_col=cgm_col, avg_delta_col="avgDelta", window_points=4)
     df2 = add_deviation_to_history_df(df2, avg_delta_col="avgDelta", bgi_col=bgi_col, deviation_col="deviation")
 

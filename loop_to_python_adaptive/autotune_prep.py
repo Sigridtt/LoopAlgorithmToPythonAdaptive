@@ -292,6 +292,7 @@ def prepare_for_autotune_isf(
     *,
     loop_algorithm_input: dict,
     cfg: AutotunePrepConfig = AutotunePrepConfig(),
+    json_history: list[dict] | None = None, 
 ) -> dict[str, Any]:
     """
     Main entry point.
@@ -316,6 +317,7 @@ def prepare_for_autotune_isf(
         include_cob=False,
         iob_col=cfg.iob_col,
         cob_col=cfg.cob_col,
+        json_history=json_history,
     )
 
     
