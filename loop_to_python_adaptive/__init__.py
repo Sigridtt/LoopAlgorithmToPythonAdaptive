@@ -12,6 +12,7 @@ from .autosens_isf import (
     compute_autosens,
     apply_autosens_to_isf,
     apply_autosens_to_basal,
+    apply_autosens_to_target,
 )
 
 __all__ = [
@@ -27,4 +28,5 @@ __all__ = [
     'compute_autosens',
     'apply_autosens_to_isf',
     'apply_autosens_to_basal',
+    'apply_autosens_to_target',
 ]
