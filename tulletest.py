@@ -12,7 +12,7 @@ df = pd.DataFrame({"CGM": [float(g["value"]) for g in glucose]}, index=idx).sort
 
 # Build a small sub-window
 sub = df.iloc[:5]
-from loop_to_python_adaptive.autotune_isf import extract_pump_basal, extract_pump_isf, extract_pump_cr
+from loop_to_python_adaptive.autotune import extract_pump_basal, extract_pump_isf, extract_pump_cr
 json_data = get_json_loop_prediction_input_from_df(
     sub,
     extract_pump_basal(loop_input),

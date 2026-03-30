@@ -370,3 +370,51 @@ def apply_autosens_to_basal(pump_basal: float, autosens_ratio: float) -> float:
     Both corrections push in the same clinical direction (more sensitive → more insulin).
     """
     return round(pump_basal * autosens_ratio, 4)
+
+def apply_autosens_to_target(
+    target_min: float,
+    target_max: float,
+    autosens_ratio: float,
+    sensitivity_raises_target: bool = True,
+    resistance_lowers_target: bool = False,
+) -> Tuple[float, float]:
+    """
+    Adjust BG target based on autosens ratio (oref0 behavior). To avoid unstable feedback loops
+    
+    Inverts the sensitivity ratio to adjust target away from the danger zone:
+      - High sensitivity (ratio < 1) → raise target to avoid hypos
+      - High resistance (ratio > 1) → lower target to tighten control
+    
+    The formula: new_target = (old_target - 60) / ratio + 60
+    This keeps the scale from 60 (hypo threshold) symmetric.
+    
+    Parameters
+    ----------
+    target_min, target_max : float
+        Current target bounds (mg/dL)
+    autosens_ratio : float
+        Autosens sensitivity ratio (0.7 to 1.2)
+    sensitivity_raises_target : bool
+        If True and ratio < 1 (sensitive), raise target
+    resistance_lowers_target : bool
+        If True and ratio > 1 (resistant), lower target
+    
+    Returns
+    -------
+    Tuple[float, float]
+        (new_min, new_max) adjusted targets
+    """
+    new_min = target_min
+    new_max = target_max
+    
+    # Raise target if sensitive
+    if sensitivity_raises_target and autosens_ratio < 1.0:
+        new_min = round((target_min - 60) / autosens_ratio) + 60
+        new_max = round((target_max - 60) / autosens_ratio) + 60
+    
+    # Lower target if resistant
+    elif resistance_lowers_target and autosens_ratio > 1.0:
+        new_min = round((target_min - 60) / autosens_ratio) + 60
+        new_max = round((target_max - 60) / autosens_ratio) + 60
+    
+    return new_min, new_max
