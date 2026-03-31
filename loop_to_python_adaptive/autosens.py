@@ -29,8 +29,14 @@ A ratio of 0.0  means BG moved exactly as insulin predicted  → sensitivity unc
 A ratio of +0.2 means BG moved 20% more than predicted       → patient is more sensitive
 A ratio of -0.2 means BG moved 20% less than predicted       → patient is more resistant
 
-oref0 then computes:
+oref0 commonly presents autosens as:
     autosens_ratio = 1 + median(ratios)
+
+That assumes a positive BGI magnitude convention. In this implementation,
+BGI may be signed (typically negative during insulin action), so we use a
+sign-safe conversion in code:
+    - mostly negative BGI: autosens_ratio = 1 - median(ratios)
+    - mostly positive BGI: autosens_ratio = 1 + median(ratios)
 
 and clips it to [autosens_min, autosens_max] = [0.7, 1.2] by default.
 
@@ -75,9 +81,13 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
+import logging
+
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -193,8 +203,9 @@ def _compute_ratio_from_points(
     A positive ratio means BG rose more than insulin predicted (more sensitive).
     A negative ratio means BG fell less than predicted (more resistant).
 
-    oref0 then computes:
-        autosens_ratio = 1 + median(ratios)
+    oref0 then computes autosens as 1 + median(ratios) under a positive-BGI
+    magnitude convention. Here we apply a sign-safe variant after inspecting
+    dominant BGI sign in the window.
 
     and clips to [autosens_min, autosens_max].
 
@@ -209,7 +220,7 @@ def _compute_ratio_from_points(
     Returns None if fewer than min_points valid ratios are available,
     which tells the caller to leave the ratio unchanged (oref0 behaviour).
     """
-    ratios: list[float] = []
+    ratios_and_bgis: list[tuple[float, float]] = []
 
     for p in points:
         # Exclude meal / UAM periods — same logic as oref0 autosens.js
@@ -232,13 +243,90 @@ def _compute_ratio_from_points(
         if not np.isfinite(ratio):
             continue
 
-        ratios.append(ratio)
+        ratios_and_bgis.append((ratio, float(p.bgi)))
 
-    if len(ratios) < cfg.min_points:
+    if len(ratios_and_bgis) < cfg.min_points:
         return None  # not enough data — leave ratio unchanged
 
-    # oref0: autosens_ratio = 1 + median(ratios)
-    return 1.0 + float(np.median(ratios))
+    # Guard-rail: mixed BGI signs can invert direction. Use dominant sign subset.
+    n_pos = sum(1 for _, b in ratios_and_bgis if b > 0)
+    n_neg = sum(1 for _, b in ratios_and_bgis if b < 0)
+    total = len(ratios_and_bgis)
+
+    use_negative = n_neg >= n_pos
+    if n_pos > 0 and n_neg > 0:
+        dominant_fraction = max(n_pos, n_neg) / total
+        ratios_and_bgis = [
+            (r, b) for (r, b) in ratios_and_bgis
+            if (b < 0 and use_negative) or (b > 0 and not use_negative)
+        ]
+        logger.warning(
+            "Autosens mixed BGI signs; using dominant-sign subset (pos=%s, neg=%s, kept=%s/%s)",
+            n_pos,
+            n_neg,
+            len(ratios_and_bgis),
+            total,
+        )
+        if dominant_fraction < 0.8 and len(ratios_and_bgis) < cfg.min_points:
+            logger.warning(
+                "Autosens skipped: mixed-sign dominant subset has too few points (kept=%s, min=%s)",
+                len(ratios_and_bgis),
+                cfg.min_points,
+            )
+            return None
+
+    ratios = [r for r, _ in ratios_and_bgis]
+    if len(ratios) < cfg.min_points:
+        return None
+
+    median_ratio = float(np.median(ratios))
+
+    # Sign-safe conversion:
+    # - mostly negative BGI (signed insulin-effect convention): 1 - median(dev/BGI)
+    # - mostly positive BGI (magnitude convention):            1 + median(dev/BGI)
+    if use_negative:
+        return 1.0 - median_ratio
+
+    logger.warning(
+        "Autosens using positive-BGI convention (pos=%s, neg=%s, n=%s)",
+        n_pos,
+        n_neg,
+        total,
+    )
+    return 1.0 + median_ratio
+
+
+def _detect_sign_mode(
+    points: list[AutosensPoint],
+    cfg: AutosensConfig,
+) -> str:
+    """Infer BGI sign convention from valid autosens points."""
+    valid_bgis: list[float] = []
+
+    for p in points:
+        if p.cob > 0:
+            continue
+        if abs(p.deviation) > cfg.deviation_threshold:
+            continue
+        if abs(p.bgi) < cfg.min_bgi_abs:
+            continue
+        valid_bgis.append(float(p.bgi))
+
+    if len(valid_bgis) < cfg.min_points:
+        return "insufficient"
+
+    n_pos = sum(1 for b in valid_bgis if b > 0)
+    n_neg = sum(1 for b in valid_bgis if b < 0)
+    total = len(valid_bgis)
+
+    if n_pos > 0 and n_neg > 0:
+        dominant = "negative" if n_neg >= n_pos else "positive"
+        if (max(n_pos, n_neg) / total) < 0.8:
+            return f"mixed->{dominant}"
+        return dominant
+    if n_neg >= n_pos:
+        return "negative"
+    return "positive"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -268,12 +356,18 @@ def compute_autosens(
         ratio        : the final autosens ratio to apply  (1.0 = no change)
         ratio_8h     : raw 8h candidate (before conservatism selection)
         ratio_24h    : raw 24h candidate (before conservatism selection)
+        sign_mode    : inferred BGI sign mode used for selected window
         n_points_8h  : number of valid ratio points in 8h window
         n_points_24h : number of valid ratio points in 24h window
         reason       : human-readable status string
     """
-    ratio_8h  = _compute_ratio_from_points(buffer.points_8h(),  cfg)
-    ratio_24h = _compute_ratio_from_points(buffer.points_24h(), cfg)
+    points_8h = buffer.points_8h()
+    points_24h = buffer.points_24h()
+
+    ratio_8h  = _compute_ratio_from_points(points_8h, cfg)
+    ratio_24h = _compute_ratio_from_points(points_24h, cfg)
+    sign_mode_8h = _detect_sign_mode(points_8h, cfg)
+    sign_mode_24h = _detect_sign_mode(points_24h, cfg)
 
     def _clip(r: float) -> float:
         """Clip ratio to [autosens_min, autosens_max]."""
@@ -293,6 +387,7 @@ def compute_autosens(
             "ratio":        1.0,
             "ratio_8h":     None,
             "ratio_24h":    None,
+            "sign_mode":    "insufficient",
             "n_points_8h":  n_8h,
             "n_points_24h": n_24h,
             "reason":       f"Insufficient data (8h={n_8h}, 24h={n_24h} points); ratio=1.0",
@@ -306,23 +401,28 @@ def compute_autosens(
     # If only one is available, use that one
     if clipped_8h is None:
         final_ratio = clipped_24h
+        sign_mode = sign_mode_24h
         reason = f"Only 24h window valid; ratio={final_ratio:.3f}"
     elif clipped_24h is None:
         final_ratio = clipped_8h
+        sign_mode = sign_mode_8h
         reason = f"Only 8h window valid; ratio={final_ratio:.3f}"
     else:
         # Both available — pick the one closer to 1.0
         if abs(clipped_8h - 1.0) < abs(clipped_24h - 1.0):
             final_ratio = clipped_8h
+            sign_mode = sign_mode_8h
             reason = f"8h more conservative; ratio={final_ratio:.3f}"
         else:
             final_ratio = clipped_24h
+            sign_mode = sign_mode_24h
             reason = f"24h more conservative; ratio={final_ratio:.3f}"
 
     return {
         "ratio":        round(final_ratio, 4),
         "ratio_8h":     round(clipped_8h,  4) if clipped_8h  is not None else None,
         "ratio_24h":    round(clipped_24h, 4) if clipped_24h is not None else None,
+        "sign_mode":    sign_mode,
         "n_points_8h":  n_8h,
         "n_points_24h": n_24h,
         "reason":       reason,

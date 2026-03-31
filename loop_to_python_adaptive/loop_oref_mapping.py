@@ -7,6 +7,7 @@ the dataframe returned has bgi, deviation, avgDelta
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
+import logging
 
 import pandas as pd
 
@@ -16,6 +17,7 @@ import loop_to_python_api.helpers as helpers
 from loop_to_python_api.api import get_prediction_values_and_dates, get_active_insulin, get_active_carbs, insulin_percent_effect_remaining
    
 AlignMode = Literal["ffill", "nearest", "strict"]
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 #   Insulin model parameters
@@ -183,6 +185,26 @@ def generate_bgi_series_from_predictions(
 
     return combined
 
+
+def _normalize_bgi_to_negative(bgi: pd.Series) -> pd.Series:
+    """Normalize BGI to signed insulin-effect convention (typically <= 0)."""
+    s = pd.to_numeric(bgi, errors="coerce")
+    valid = s.dropna()
+    if valid.empty:
+        return s
+
+    n_pos = int((valid > 0).sum())
+    n_neg = int((valid < 0).sum())
+
+    if n_pos > n_neg:
+        logger.warning(
+            "BGI normalization flipped sign to negative convention (pos=%s, neg=%s)",
+            n_pos,
+            n_neg,
+        )
+        s = -s
+    return s
+
 '''
 def generate_bgi_series_from_activity(
     df: pd.DataFrame,
@@ -266,9 +288,10 @@ def add_bgi_to_history_df(
         loop_algorithm_input = api.get_loop_algorithm_input()
     insulin_type = loop_algorithm_input.get("insulinType", "novolog")
 
-    out[bgi_col] = generate_bgi_series_from_predictions(
+    raw_bgi = generate_bgi_series_from_predictions(
             out,
             json_history=json_history,)
+    out[bgi_col] = _normalize_bgi_to_negative(raw_bgi)
   
 
     # Aligning timestamps needed for bgi from predictions as they are "in the future"

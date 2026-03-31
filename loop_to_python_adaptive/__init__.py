@@ -5,7 +5,7 @@ from .autotune import (
     run_autotune_basal_iterations,
     AutotuneConfig,
 )
-from .autosens_isf import (
+from .autosens import (
     AutosensConfig,
     AutosensBuffer,
     AutosensPoint,

@@ -44,6 +44,7 @@ class AutotuneConfig:
     """
     min_points: int = 10
     adjustment_fraction: float = 1.0
+    cr_adjustment_fraction: float = 0.5 
     autosens_max: float = 1.2
     autosens_min: float = 0.7
     min_bgi_abs: float = 1e-6
