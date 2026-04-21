@@ -1,0 +1,13 @@
+{
+    "first": 1,
+    "units": "grams",
+    "schedule": [
+        {
+            "x": 0,
+            "i": 0,
+            "start": "00:00:00",
+            "offset": 0,
+            "ratio": 15
+        }
+    ]
+}

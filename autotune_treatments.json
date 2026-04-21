@@ -1,0 +1,432 @@
+[
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T03:44:43-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f985f82bf9b6cf67a789c",
+        "duration": 60,
+        "raw_duration": {
+            "duration (min)": 60,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T03:44:43-05:00"
+        },
+        "timestamp": "2018-09-05T03:44:43-05:00",
+        "absolute": 0,
+        "rate": 0,
+        "raw_rate": {
+            "rate": 0,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T03:44:43-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T03:29:47-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f94a582bf9b6cf67a55b2",
+        "duration": 60,
+        "raw_duration": {
+            "duration (min)": 60,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T03:29:47-05:00"
+        },
+        "timestamp": "2018-09-05T03:29:47-05:00",
+        "absolute": 0,
+        "rate": 0,
+        "raw_rate": {
+            "rate": 0,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T03:29:47-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T03:14:21-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f90b382bf9b6cf67a31cd",
+        "duration": 60,
+        "raw_duration": {
+            "duration (min)": 60,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T03:14:21-05:00"
+        },
+        "timestamp": "2018-09-05T03:14:21-05:00",
+        "absolute": 0,
+        "rate": 0,
+        "raw_rate": {
+            "rate": 0,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T03:14:21-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T03:10:30-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f8fff82bf9b6cf67a2b41",
+        "duration": 30,
+        "raw_duration": {
+            "duration (min)": 30,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T03:10:30-05:00"
+        },
+        "timestamp": "2018-09-05T03:10:30-05:00",
+        "absolute": 0,
+        "rate": 0,
+        "raw_rate": {
+            "rate": 0,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T03:10:30-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T02:54:45-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f8f0082bf9b6cf67a224d",
+        "duration": 30,
+        "raw_duration": {
+            "duration (min)": 30,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T02:54:45-05:00"
+        },
+        "timestamp": "2018-09-05T02:54:45-05:00",
+        "absolute": 0.1,
+        "rate": 0.1,
+        "raw_rate": {
+            "rate": 0.1,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T02:54:45-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T02:49:42-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f8b1282bf9b6cf67a0101",
+        "duration": 60,
+        "raw_duration": {
+            "duration (min)": 60,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T02:49:42-05:00"
+        },
+        "timestamp": "2018-09-05T02:49:42-05:00",
+        "absolute": 0,
+        "rate": 0,
+        "raw_rate": {
+            "rate": 0,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T02:49:42-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T02:34:58-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f87d082bf9b6cf679e371",
+        "duration": 30,
+        "raw_duration": {
+            "duration (min)": 30,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T02:34:58-05:00"
+        },
+        "timestamp": "2018-09-05T02:34:58-05:00",
+        "absolute": 0.2,
+        "rate": 0.2,
+        "raw_rate": {
+            "rate": 0.2,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T02:34:58-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T02:24:58-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f853482bf9b6cf679cbbb",
+        "duration": 30,
+        "raw_duration": {
+            "duration (min)": 30,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T02:24:58-05:00"
+        },
+        "timestamp": "2018-09-05T02:24:58-05:00",
+        "absolute": 0.3,
+        "rate": 0.3,
+        "raw_rate": {
+            "rate": 0.3,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T02:24:58-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T02:14:58-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f82d382bf9b6cf679b597",
+        "duration": 30,
+        "raw_duration": {
+            "duration (min)": 30,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T02:14:58-05:00"
+        },
+        "timestamp": "2018-09-05T02:14:58-05:00",
+        "absolute": 0.5,
+        "rate": 0.5,
+        "raw_rate": {
+            "rate": 0.5,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T02:14:58-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "NSCLIENT_ID": 1536115767681,
+        "_id": "5b8f4438c09b910004e36513",
+        "created_at": "2018-09-05T02:00:00Z",
+        "eventType": "Meal Bolus",
+        "glucose": 108,
+        "glucoseType": "Finger",
+        "carbs": 62,
+        "units": "mg/dl",
+        "enteredBy": "Jeremy"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T01:44:52-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f7c0782bf9b6cf679770b",
+        "duration": 30,
+        "raw_duration": {
+            "duration (min)": 30,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T01:44:52-05:00"
+        },
+        "timestamp": "2018-09-05T01:44:52-05:00",
+        "absolute": 0.45,
+        "rate": 0.45,
+        "raw_rate": {
+            "rate": 0.45,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T01:44:52-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T01:22:38-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f76e282bf9b6cf679484f",
+        "duration": 30,
+        "raw_duration": {
+            "duration (min)": 30,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T01:22:38-05:00"
+        },
+        "timestamp": "2018-09-05T01:22:38-05:00",
+        "absolute": 0.6,
+        "rate": 0.6,
+        "raw_rate": {
+            "rate": 0.6,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T01:22:38-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T01:19:43-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f75f282bf9b6cf6793fa8",
+        "duration": 30,
+        "raw_duration": {
+            "duration (min)": 30,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T01:19:43-05:00"
+        },
+        "timestamp": "2018-09-05T01:19:43-05:00",
+        "absolute": 0.05,
+        "rate": 0.05,
+        "raw_rate": {
+            "rate": 0.05,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T01:19:43-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "created_at": "2018-09-05T01:10:07.021Z",
+        "duration": 0,
+        "reason": "",
+        "eventType": "Temporary Target",
+        "enteredBy": "Jeremy",
+        "_id": "5b8f2cef82bf9b6cf676983c"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T01:04:53-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f726f82bf9b6cf6791e84",
+        "duration": 30,
+        "raw_duration": {
+            "duration (min)": 30,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T01:04:53-05:00"
+        },
+        "timestamp": "2018-09-05T01:04:53-05:00",
+        "absolute": 0.65,
+        "rate": 0.65,
+        "raw_rate": {
+            "rate": 0.65,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T01:04:53-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T00:59:30-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f713f82bf9b6cf6791360",
+        "duration": 30,
+        "raw_duration": {
+            "duration (min)": 30,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T00:59:30-05:00"
+        },
+        "timestamp": "2018-09-05T00:59:30-05:00",
+        "absolute": 0,
+        "rate": 0,
+        "raw_rate": {
+            "rate": 0,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T00:59:30-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T00:54:54-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f705482bf9b6cf6790aad",
+        "duration": 30,
+        "raw_duration": {
+            "duration (min)": 30,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T00:54:54-05:00"
+        },
+        "timestamp": "2018-09-05T00:54:54-05:00",
+        "absolute": 0.75,
+        "rate": 0.75,
+        "raw_rate": {
+            "rate": 0.75,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T00:54:54-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T00:34:37-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f6b6782bf9b6cf678dd0f",
+        "duration": 30,
+        "raw_duration": {
+            "duration (min)": 30,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T00:34:37-05:00"
+        },
+        "timestamp": "2018-09-05T00:34:37-05:00",
+        "absolute": 0.55,
+        "rate": 0.55,
+        "raw_rate": {
+            "rate": 0.55,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T00:34:37-05:00"
+        },
+        "eventType": "Temp Basal"
+    },
+    {
+        "insulin": null,
+        "carbs": null,
+        "enteredBy": "openaps://medtronic/723",
+        "created_at": "2018-09-05T00:29:56-05:00",
+        "medtronic": "mm://openaps/mm-format-ns-treatments/Temp Basal",
+        "_id": "5b8f6a3b82bf9b6cf678d1c6",
+        "duration": 30,
+        "raw_duration": {
+            "duration (min)": 30,
+            "_type": "TempBasalDuration",
+            "timestamp": "2018-09-05T00:29:56-05:00"
+        },
+        "timestamp": "2018-09-05T00:29:56-05:00",
+        "absolute": 0.85,
+        "rate": 0.85,
+        "raw_rate": {
+            "rate": 0.85,
+            "temp": "absolute",
+            "_type": "TempBasal",
+            "timestamp": "2018-09-05T00:29:56-05:00"
+        },
+        "eventType": "Temp Basal"
+    }
+]

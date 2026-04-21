@@ -1,0 +1,31 @@
+{
+    "units": "mg/dL",
+    "user_preferred_units": "mg/dL",
+    "targets": [
+        {
+            "i": 0,
+            "high": 250,
+            "start": "00:00:00",
+            "low": 110,
+            "offset": 0,
+            "x": 0
+        },
+        {
+            "i": 12,
+            "high": 250,
+            "start": "06:00:00",
+            "low": 105,
+            "offset": 360,
+            "x": 1
+        },
+        {
+            "i": 44,
+            "high": 250,
+            "start": "22:00:00",
+            "low": 110,
+            "offset": 1320,
+            "x": 2
+        }
+    ],
+    "first": 1
+}

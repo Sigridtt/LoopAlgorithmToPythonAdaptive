@@ -1,0 +1,14 @@
+[
+    {
+        "_id": "5b942fa682bf9b6cf6a48ae2",
+        "enteredBy": "IFTTT-button",
+        "eventType": "Temporary Target",
+        "reason": "treat high",
+        "targetTop": 80,
+        "targetBottom": 80,
+        "duration": 60,
+        "created_at": "2018-09-04T20:23:02.888Z",
+        "carbs": null,
+        "insulin": null
+    }
+]

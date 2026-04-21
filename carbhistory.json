@@ -1,0 +1,25 @@
+[
+    {
+        "_id": "5b8f4438c09b910004e36513",
+        "created_at": "2018-09-05T02:00:00Z",
+        "eventType": "Meal Bolus",
+        "glucose": 108,
+        "glucoseType": "Finger",
+        "carbs": 62,
+        "units": "mg/dl",
+        "enteredBy": "User",
+        "NSCLIENT_ID": 1536115767681,
+        "insulin": null
+    },
+    {
+        "_id": "5b8f227fc09b910004e36491",
+        "created_at": "2018-09-05T00:25:27Z",
+        "eventType": "Carb Correction",
+        "glucose": 47,
+        "glucoseType": "Sensor",
+        "carbs": 30,
+        "units": "mg/dl",
+        "NSCLIENT_ID": 1536107135539,
+        "insulin": null
+    }
+]

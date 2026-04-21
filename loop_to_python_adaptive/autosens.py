@@ -116,6 +116,8 @@ class AutosensConfig:
     min_points: int            = 10     # minimum valid ratios before updating
     deviation_threshold: float = 6.0   # mg/dL/5min — exclude UAM/meal spikes
     min_bgi_abs: float         = 1e-6  # avoid division by near-zero BGI
+    unexpected_rise_iob_threshold: float = 0.3 #
+    unexpected_rise_deviation_threshold: float = 6.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,8 +141,18 @@ class AutosensPoint:
     """
     deviation: float
     bgi:       float
+    iob:       float  = 0.0
     cob:       float  = 0.0    # 0 if not tracked
     glucose:   float  = 100.0  # fallback if not available
+
+
+def _is_unexpected_rise(p: AutosensPoint, cfg: AutosensConfig) -> bool:
+    return (
+        p.cob <= 0
+        and p.iob >= cfg.unexpected_rise_iob_threshold
+        and p.deviation >= cfg.unexpected_rise_deviation_threshold
+        and p.bgi < -cfg.min_bgi_abs
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -192,13 +204,11 @@ class AutosensBuffer:
 def _compute_ratio_from_points(
     points: list[AutosensPoint],
     cfg: AutosensConfig,
+    isf: float,
+    max_basal: float,
 ) -> Optional[float]:
     """
     Compute the autosens ratio from a list of AutosensPoints.
-
-    oref0 lib/autosens.js (line ~115):
-
-        ratio = deviation / BGI
 
     A positive ratio means BG rose more than insulin predicted (more sensitive).
     A negative ratio means BG fell less than predicted (more resistant).
@@ -220,80 +230,49 @@ def _compute_ratio_from_points(
     Returns None if fewer than min_points valid ratios are available,
     which tells the caller to leave the ratio unchanged (oref0 behaviour).
     """
-    ratios_and_bgis: list[tuple[float, float]] = []
+    deviations: list[float] = []
 
     for p in points:
-        # Exclude meal / UAM periods — same logic as oref0 autosens.js
-        if p.cob > 0:
-            continue
-        if abs(p.deviation) > cfg.deviation_threshold:
+        # --- Filtering (match oref0 as closely as possible) ---
+        
+        if abs(p.deviation) > cfg.deviation_threshold and not _is_unexpected_rise(p, cfg):
             continue
 
-        # Low-BG rule: oref0 zeroes positive deviations below 80 mg/dL
-        # (lib/autosens.js mirrors autotune's categorize.js rule)
-        deviation = p.deviation
-        if p.glucose < 80 and deviation > 0:
-            deviation = 0.0
-
-        # Skip near-zero BGI to avoid numerical instability
         if abs(p.bgi) < cfg.min_bgi_abs:
             continue
 
-        ratio = deviation / p.bgi
-        if not np.isfinite(ratio):
+        deviation = p.deviation
+
+        # Low BG rule
+        if p.glucose < 80 and deviation > 0:
+            deviation = 0.0
+
+        if not np.isfinite(deviation):
             continue
 
-        ratios_and_bgis.append((ratio, float(p.bgi)))
+        deviations.append(float(deviation))
 
-    if len(ratios_and_bgis) < cfg.min_points:
-        return None  # not enough data — leave ratio unchanged
-
-    # Guard-rail: mixed BGI signs can invert direction. Use dominant sign subset.
-    n_pos = sum(1 for _, b in ratios_and_bgis if b > 0)
-    n_neg = sum(1 for _, b in ratios_and_bgis if b < 0)
-    total = len(ratios_and_bgis)
-
-    use_negative = n_neg >= n_pos
-    if n_pos > 0 and n_neg > 0:
-        dominant_fraction = max(n_pos, n_neg) / total
-        ratios_and_bgis = [
-            (r, b) for (r, b) in ratios_and_bgis
-            if (b < 0 and use_negative) or (b > 0 and not use_negative)
-        ]
-        logger.warning(
-            "Autosens mixed BGI signs; using dominant-sign subset (pos=%s, neg=%s, kept=%s/%s)",
-            n_pos,
-            n_neg,
-            len(ratios_and_bgis),
-            total,
-        )
-        if dominant_fraction < 0.8 and len(ratios_and_bgis) < cfg.min_points:
-            logger.warning(
-                "Autosens skipped: mixed-sign dominant subset has too few points (kept=%s, min=%s)",
-                len(ratios_and_bgis),
-                cfg.min_points,
-            )
-            return None
-
-    ratios = [r for r, _ in ratios_and_bgis]
-    if len(ratios) < cfg.min_points:
+    if len(deviations) < cfg.min_points:
         return None
 
-    median_ratio = float(np.median(ratios))
+    # --- DAMPING (critical!) ---
+    # oref0 pads with zeros when insufficient data (<96 points)
+    target_len = cfg.window_8h_points  # 96
+    if len(deviations) < target_len:
+        pad = int(round((1 - len(deviations) / target_len) * 18))
+        deviations.extend([0.0] * pad)
 
-    # Sign-safe conversion:
-    # - mostly negative BGI (signed insulin-effect convention): 1 - median(dev/BGI)
-    # - mostly positive BGI (magnitude convention):            1 + median(dev/BGI)
-    if use_negative:
-        return 1.0 - median_ratio
+    # --- Percentile (median = p50) ---
+    median_dev = float(np.percentile(deviations, 50))
 
-    logger.warning(
-        "Autosens using positive-BGI convention (pos=%s, neg=%s, n=%s)",
-        n_pos,
-        n_neg,
-        total,
-    )
-    return 1.0 + median_ratio
+    # --- Convert to basalOff (oref0 logic) ---
+    # basalOff = deviation * (60/5) / ISF
+    basal_off = median_dev * (60 / 5) / isf  # = *12 / ISF
+
+    # --- Convert to ratio ---
+    ratio = 1.0 + (basal_off / max_basal)
+
+    return ratio
 
 
 def _detect_sign_mode(
@@ -304,9 +283,7 @@ def _detect_sign_mode(
     valid_bgis: list[float] = []
 
     for p in points:
-        if p.cob > 0:
-            continue
-        if abs(p.deviation) > cfg.deviation_threshold:
+        if abs(p.deviation) > cfg.deviation_threshold and not _is_unexpected_rise(p, cfg):
             continue
         if abs(p.bgi) < cfg.min_bgi_abs:
             continue
@@ -336,6 +313,8 @@ def _detect_sign_mode(
 def compute_autosens(
     buffer: AutosensBuffer,
     cfg:    AutosensConfig,
+    isf: float,
+    max_basal: float,
 ) -> dict:
     """
     Compute the autosens ratio from the rolling buffer.
@@ -364,8 +343,8 @@ def compute_autosens(
     points_8h = buffer.points_8h()
     points_24h = buffer.points_24h()
 
-    ratio_8h  = _compute_ratio_from_points(points_8h, cfg)
-    ratio_24h = _compute_ratio_from_points(points_24h, cfg)
+    ratio_8h  = _compute_ratio_from_points(points_8h, cfg, isf, max_basal)
+    ratio_24h = _compute_ratio_from_points(points_24h, cfg, isf, max_basal)
     sign_mode_8h = _detect_sign_mode(points_8h, cfg)
     sign_mode_24h = _detect_sign_mode(points_24h, cfg)
 
@@ -375,10 +354,14 @@ def compute_autosens(
 
     # Count valid points for diagnostics
     n_8h  = len([p for p in buffer.points_8h()
-                 if p.cob == 0 and abs(p.deviation) <= cfg.deviation_threshold
+                 if (
+                     abs(p.deviation) <= cfg.deviation_threshold or _is_unexpected_rise(p, cfg)
+                 )
                  and abs(p.bgi) >= cfg.min_bgi_abs])
     n_24h = len([p for p in buffer.points_24h()
-                 if p.cob == 0 and abs(p.deviation) <= cfg.deviation_threshold
+                if (
+                     abs(p.deviation) <= cfg.deviation_threshold or _is_unexpected_rise(p, cfg)
+                 )
                  and abs(p.bgi) >= cfg.min_bgi_abs])
 
     # Neither window has enough data
@@ -449,6 +432,15 @@ def apply_autosens_to_isf(autotune_isf: float, autosens_ratio: float) -> float:
     This is the ONLY place the autosens ratio is applied to ISF.
     The autotune_isf (daily baseline) is never modified by autosens.
     """
+
+    if autosens_ratio < 1:
+            logger.warning("Autosens ratio; autosens_ratio %.3f", autosens_ratio)
+            logger.warning(
+                "Autosens ratio < 1.0 (resistant); effective ISF %.3f > autotune ISF %.3f",
+                autotune_isf / autosens_ratio,
+                autotune_isf,
+            )
+            return round(autotune_isf / autosens_ratio,3)
     if autosens_ratio <= 0:
         return autotune_isf
     return round(autotune_isf / autosens_ratio, 3)

@@ -1,0 +1,9 @@
+[
+    {
+        "date": 1535947102261,
+        "scale": 1,
+        "intercept": 34058.44519508067,
+        "slope": 955.9093730012227,
+        "type": "LeastSquaresRegression"
+    }
+]

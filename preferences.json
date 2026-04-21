@@ -1,0 +1,9 @@
+{
+    "bool_true": true,
+    "bool_false": false,
+    "number_5": 5,
+    "number_3_5": 3.5,
+    "number_big": 1.1e+99,
+    "string_hello": "hello",
+    "null_value": null
+}

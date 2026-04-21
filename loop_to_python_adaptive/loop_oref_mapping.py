@@ -51,6 +51,34 @@ def _to_utc_index(df: pd.DataFrame) -> pd.DataFrame:
     out.index = out.index.tz_localize("UTC") if out.index.tz is None else out.index.tz_convert("UTC")
     return out
 
+# ═══════════════════════════════════════════════════════════════════════════
+#   EXTRACTION HELPERS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def extract_pump_isf(loop_algorithm_input: dict) -> float:
+    """Extract pump ISF from loop_algorithm_input."""
+    sensitivity = loop_algorithm_input.get("sensitivity", [])
+    if not sensitivity:
+        raise ValueError("loop_algorithm_input has no 'sensitivity' key")
+    return float(sensitivity[0]["value"])
+
+
+def extract_pump_basal(loop_algorithm_input: dict) -> float:
+    """Extract pump basal rate from loop_algorithm_input."""
+    basal = loop_algorithm_input.get("basal", [])
+    if not basal:
+        raise ValueError("loop_algorithm_input has no 'basal' key")
+    return float(basal[0]["value"])
+
+
+def extract_pump_cr(loop_algorithm_input: dict) -> float:
+    """Extract pump carb ratio from loop_algorithm_input."""
+    carb_ratio = loop_algorithm_input.get("carbRatio", [])
+    if not carb_ratio:
+        raise ValueError("loop_algorithm_input has no 'carbRatio' key")
+    return float(carb_ratio[0]["value"])
+
+
 ##########################
 #   GENERATE BGI SERIES  #
 ##########################
@@ -186,24 +214,7 @@ def generate_bgi_series_from_predictions(
     return combined
 
 
-def _normalize_bgi_to_negative(bgi: pd.Series) -> pd.Series:
-    """Normalize BGI to signed insulin-effect convention (typically <= 0)."""
-    s = pd.to_numeric(bgi, errors="coerce")
-    valid = s.dropna()
-    if valid.empty:
-        return s
 
-    n_pos = int((valid > 0).sum())
-    n_neg = int((valid < 0).sum())
-
-    if n_pos > n_neg:
-        logger.warning(
-            "BGI normalization flipped sign to negative convention (pos=%s, neg=%s)",
-            n_pos,
-            n_neg,
-        )
-        s = -s
-    return s
 
 '''
 def generate_bgi_series_from_activity(
@@ -291,7 +302,10 @@ def add_bgi_to_history_df(
     raw_bgi = generate_bgi_series_from_predictions(
             out,
             json_history=json_history,)
-    out[bgi_col] = _normalize_bgi_to_negative(raw_bgi)
+    out[bgi_col] = pd.to_numeric(raw_bgi, errors="coerce")
+
+    #if (out[bgi_col] > 0).sum() > (out[bgi_col] < 0).sum():
+        #logger.warning("BGI mostly positive — possible sign mismatch with Loop predictions")
   
 
     # Aligning timestamps needed for bgi from predictions as they are "in the future"

@@ -21,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from loop_to_python_adaptive.autotune_isf import (
+from loop_to_python_adaptive.autotune import (
     run_autotune_isf_iterations,
     update_profile_isf,
     extract_pump_isf,
@@ -113,7 +113,7 @@ def test_pipeline_categorisation(loop_input, df_window):
         AutotunePrepConfig,
         prepare_for_autotune_isf,
     )
-    from loop_to_python_adaptive.autotune_isf import extract_pump_basal, extract_pump_cr
+    from loop_to_python_adaptive.autotune import extract_pump_basal, extract_pump_cr
 
     cfg = AutotunePrepConfig(
         basal_rate=extract_pump_basal(loop_input),

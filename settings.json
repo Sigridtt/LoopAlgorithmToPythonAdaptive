@@ -1,0 +1,9 @@
+{
+    "auto_off_duration_hrs": 0,
+    "insulin_action_curve": 7,
+    "insulinConcentration": 50,
+    "maxBolus": 3,
+    "maxBasal": 2.8,
+    "rf_enable": false,
+    "selected_pattern": 0
+}

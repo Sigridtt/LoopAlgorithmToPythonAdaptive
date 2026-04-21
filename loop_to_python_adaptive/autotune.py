@@ -22,10 +22,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 import copy
 
-from loop_to_python_adaptive.autotune_prep import (
-    AutotunePrepConfig,
-    prepare_for_autotune_isf,
-)
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -37,7 +34,8 @@ class AutotuneConfig:
     """
     Generic autotune config for any parameter.
     
-    adjustment_fraction : Blend toward pump value (1.0 = full adjustment)
+    adjustment_fraction : Blend toward pump value (1.0 = full adjustment) for ISF and basal
+    cr_adjustment_fraction : Blend toward pump value for CR
     autosens_max/min   : Safety caps as multiples of pump value
     min_points         : Minimum data points required before tuning
     min_bgi_abs        : Skip points where |BGI| is too small
@@ -50,33 +48,22 @@ class AutotuneConfig:
     min_bgi_abs: float = 1e-6
 
 
-@dataclass(frozen=True)
-class ParameterTuner:
-    """
-    Specifies how to extract/set a specific parameter from/to loop_algorithm_input.
-    """
-    name: str                              # "ISF", "CR", "Basal"
-    extract_pump: Callable[[dict], float]  # Extracts pump (baseline) value
-    extract_current: Callable[[dict], float]  # Extracts current value
-    update_profile: Callable[[dict, float], dict]  # Sets new value and returns updated dict
-    data_category: str                     # Which category to use from autotune_prep
-                                          # "ISFGlucoseData", "basalGlucoseData", "CSFGlucoseData"
 
-
+# Tune ISF OR basal
 def tune_parameter(
     *,
     param_name: str,
     current_value: float,
     glucose_data: list[dict[str, Any]],
     pump_value: float,
-    cfg: AutotuneConfig = AutotuneConfig(),
+    cfg: AutotuneConfig,
 ) -> dict[str, Any]:
     """
-    Generic parameter tuning, following oref0 algorithm.
+    Parameter tuning, following oref0 algorithm.
 
     Parameters
     ----------
-    param_name     : Human-readable name for logging ("ISF", "CR", "Basal")
+    param_name     : Human-readable name for logging ("ISF", "Basal")
     current_value  : Current parameter value (what we're tuning from)
     glucose_data   : List of dicts with "deviation" and "BGI" keys
     pump_value     : Original pump value (safety anchor)
@@ -86,15 +73,13 @@ def tune_parameter(
     -------
     dict with keys:
         newValue       : Parameter value to use next iteration
-        fullNewValue   : Raw value implied by data
-        adjustedValue  : After blend and cap
         p50_ratio      : Median of per-point ratios
         n_points       : Number of usable data points
         reason         : Status string
     """
 
     # Step 1: Compute per-point ratios
-    ratios: list[float] = []
+    ratios = []
     for p in glucose_data:
         bgi = float(p.get("BGI", 0))
         if abs(bgi) < cfg.min_bgi_abs:
@@ -109,8 +94,6 @@ def tune_parameter(
     if len(ratios) < cfg.min_points:
         return {
             "newValue": current_value,
-            "fullNewValue": None,
-            "adjustedValue": None,
             "p50_ratio": None,
             "n_points": len(ratios),
             "reason": f"Only {len(ratios)} {param_name} points (<{cfg.min_points}); {param_name} unchanged.",
@@ -119,6 +102,8 @@ def tune_parameter(
     # Step 3: Compute median ratio and full new value
     p50_ratio = float(np.median(ratios))
     full_new_value = round(current_value * p50_ratio, 3)
+
+
 
     # Step 4: Blend toward pump_value
     max_value = pump_value / cfg.autosens_min
@@ -154,329 +139,167 @@ def tune_parameter(
 
     return {
         "newValue": new_value,
-        "fullNewValue": full_new_value,
-        "adjustedValue": adjusted_value,
         "p50_ratio": p50_ratio,
         "n_points": len(ratios),
         "reason": "OK",
     }
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#   EXTRACTION HELPERS
-# ═══════════════════════════════════════════════════════════════════════════
-
-def extract_pump_isf(loop_algorithm_input: dict) -> float:
-    """Extract pump ISF from loop_algorithm_input."""
-    sensitivity = loop_algorithm_input.get("sensitivity", [])
-    if not sensitivity:
-        raise ValueError("loop_algorithm_input has no 'sensitivity' key")
-    return float(sensitivity[0]["value"])
-
-
-def extract_pump_basal(loop_algorithm_input: dict) -> float:
-    """Extract pump basal rate from loop_algorithm_input."""
-    basal = loop_algorithm_input.get("basal", [])
-    if not basal:
-        raise ValueError("loop_algorithm_input has no 'basal' key")
-    return float(basal[0]["value"])
-
-
-def extract_pump_cr(loop_algorithm_input: dict) -> float:
-    """Extract pump carb ratio from loop_algorithm_input."""
-    carb_ratio = loop_algorithm_input.get("carbRatio", [])
-    if not carb_ratio:
-        raise ValueError("loop_algorithm_input has no 'carbRatio' key")
-    return float(carb_ratio[0]["value"])
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#   PROFILE UPDATE HELPERS
-# ═══════════════════════════════════════════════════════════════════════════
-
-def update_profile_isf(
-    loop_algorithm_input: dict,
-    new_isf: float,
-) -> dict:
-    """Update ISF in profile by scaling the sensitivity schedule."""
-    updated = copy.deepcopy(loop_algorithm_input)
-    old_isf = extract_pump_isf(updated)
-    if old_isf == 0:
-        return updated
-    ratio = new_isf / old_isf
-    for entry in updated.get("sensitivity", []):
-        entry["value"] = round(float(entry["value"]) * ratio, 3)
-    return updated
-
-
-def update_profile_basal(
-    loop_algorithm_input: dict,
-    new_basal: float,
-) -> dict:
-    """Update basal in profile by scaling the basal schedule."""
-    updated = copy.deepcopy(loop_algorithm_input)
-    old_basal = extract_pump_basal(updated)
-    if old_basal == 0:
-        return updated
-    ratio = new_basal / old_basal
-    for entry in updated.get("basal", []):
-        entry["value"] = round(float(entry["value"]) * ratio, 3)
-    return updated
-
-
-def update_profile_cr(
-    loop_algorithm_input: dict,
-    new_cr: float,
-) -> dict:
-    """Update carb ratio in profile by scaling the carbRatio schedule."""
-    updated = copy.deepcopy(loop_algorithm_input)
-    old_cr = extract_pump_cr(updated)
-    if old_cr == 0:
-        return updated
-    ratio = new_cr / old_cr
-    for entry in updated.get("carbRatio", []):
-        entry["value"] = round(float(entry["value"]) * ratio, 3)
-    return updated
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#   PARAMETER TUNER DEFINITIONS (factory functions)
-# ═══════════════════════════════════════════════════════════════════════════
-
-def get_isf_tuner() -> ParameterTuner:
-    """Create a tuner for ISF."""
-    return ParameterTuner(
-        name="ISF",
-        extract_pump=extract_pump_isf,
-        extract_current=extract_pump_isf,  # On first call, current = pump
-        update_profile=update_profile_isf,
-        data_category="ISFGlucoseData",
-    )
-
-
-def get_basal_tuner() -> ParameterTuner:
-    """Create a tuner for basal rate."""
-    return ParameterTuner(
-        name="Basal",
-        extract_pump=extract_pump_basal,
-        extract_current=extract_pump_basal,
-        update_profile=update_profile_basal,
-        data_category="basalGlucoseData",
-    )
-
-
-def get_cr_tuner() -> ParameterTuner:
-    """Create a tuner for carb ratio."""
-    return ParameterTuner(
-        name="CR",
-        extract_pump=extract_pump_cr,
-        extract_current=extract_pump_cr,
-        update_profile=update_profile_cr,
-        data_category="CSFGlucoseData",  # CR uses CSF data from autotune_prep
-    )
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#   GENERIC MULTI-ITERATION RUNNER
-# ═══════════════════════════════════════════════════════════════════════════
-
-def run_autotune_parameter_iterations(
-    df_windows: list,
-    *,
-    loop_algorithm_inputs: list[dict],
-    tuner: ParameterTuner,
-    pump_value: float | None = None,
-    current_value: float | None = None,
-    n_iterations: int = 1,
-    cfg: AutotuneConfig = AutotuneConfig(),
-    json_history_list: list[list[dict]] | None = None,
-) -> dict[str, Any]:
+def tune_cr(
+        *,
+        current_cr: float,
+        pump_cr: float,
+        cr_data: list[dict[str, Any]],
+        isf: float, 
+        cfg: AutotuneConfig
+) -> dict[str,Any]:
     """
-    Run parameter autotune for n_iterations.
+    Parameter tuning for CR, following oref0 algorithm.
 
     Parameters
     ----------
-    df_windows             : List of DataFrames (one per day)
-    loop_algorithm_inputs  : Matching list of Loop JSON dicts
-    tuner                  : ParameterTuner specifying the parameter
-    pump_value             : Original pump parameter value (anchor)
-    current_value          : Current parameter value (what we're tuning from)
-    n_iterations           : Number of passes
-    cfg                    : AutotuneConfig
-    json_history_list      : BGI history for each window
+    current_cr  : Current parameter value (what we're tuning from)
+    pump_cr     : Original pump value (safety anchor)
+    cr_data   : List of dicts with "deviation" and "BGI" keys
+    isf       : Current ISF
+    cfg            : AutotuneConfig
 
     Returns
     -------
     dict with keys:
-        finalValue      : Parameter value after all iterations
-        value_history   : List of values after each iteration
-        last_result     : Full result from final tune_parameter() call
+        newValue       : Parameter value to use next iteration
+        p50_ratio      : Median of per-point ratios
+        n_points       : Number of usable data points
+        reason         : Status string
     """
+    ratios = []
 
-    # Extract pump value if not provided
-    if pump_value is None:
-        pump_value = tuner.extract_pump(loop_algorithm_inputs[0])
+    for d in cr_data:
+        carbs = float(d.get("CRCarbs", 0))
+        if carbs <= 0:
+            continue
+        bg0 = float(d.get("CRInitialBG", 0))
+        bg1 = float(d.get("CREndBG", 0))
 
-    if current_value is None:
-        current_value = pump_value
+        iob0 = float(d.get("CRInitialIOB", 0))
+        iob1 = float(d.get("CREndIOB", 0))
 
-    value_history: list[float] = []
-    last_result: dict[str, Any] = {}
+        delta_bg = bg1 - bg0
+        delta_iob = iob0 - iob1
 
-    for iteration in range(n_iterations):
-        print(
-            f"\n=== Autotune {tuner.name} iteration {iteration+1}/{n_iterations} "
-            f"(current={current_value:.3f}) ==="
-        )
+        insulin_used = delta_iob + (delta_bg / isf)
 
-        all_points: list[dict[str, Any]] = []
+        if insulin_used <= 0:
+            continue
 
-        # Prepare config for this iteration
-        # Need basal, isf, cr for prep — use either pump or current
-        prep_cfg = AutotunePrepConfig(
-            basal_rate=extract_pump_basal(loop_algorithm_inputs[0]),
-            isf=extract_pump_isf(loop_algorithm_inputs[0]),
-            carb_ratio=extract_pump_cr(loop_algorithm_inputs[0]),
-        )
+        implied_cr = carbs / insulin_used
 
-        for i, (df_window, loop_input) in enumerate(
-            zip(df_windows, loop_algorithm_inputs)
-        ):
-            print(f"  Window {i+1}/{len(df_windows)}...", end=" ", flush=True)
+        if not np.isfinite(implied_cr):
+            continue
 
-            window_json_history = (
-                json_history_list[i]
-                if json_history_list and i < len(json_history_list)
-                else None
-            )
+        ratio = implied_cr / current_cr
 
-            # Prepare all categories from this window
-            result = prepare_for_autotune_isf(
-                df_window,
-                loop_algorithm_input=loop_input,
-                cfg=prep_cfg,
-                json_history=window_json_history,
-            )
+        # safety clamp
+        if ratio < 0.5 or ratio > 1.5:
+            continue
 
-            # Extract the category relevant to this parameter
-            window_points = result.get(tuner.data_category, [])
-            all_points.extend(window_points)
+        ratios.append(ratio)
 
-            print(f"{len(window_points)} {tuner.name} points")
+    if len(ratios) < cfg.min_points:
+        return {
+            "newValue": current_cr,
+            "reason": "Not enough CR data",
+            "n_points": len(ratios),
+        }
 
-        print(f"  Total {tuner.name} points: {len(all_points)}")
+    p50 = float(np.median(ratios))
 
-        # Tune this parameter
-        last_result = tune_parameter(
-            param_name=tuner.name,
-            current_value=current_value,
-            glucose_data=all_points,
-            pump_value=pump_value,
-            cfg=cfg,
-        )
+    full_new = current_cr * p50
 
-        current_value = last_result["newValue"]
-        value_history.append(current_value)
+    min_val = pump_cr / cfg.autosens_max
+    max_val = pump_cr / cfg.autosens_min
+
+    adjusted = (
+        cfg.cr_adjustment_fraction * full_new +
+        (1 - cfg.cr_adjustment_fraction) * pump_cr
+    )
+
+    adjusted = max(min_val, min(max_val, adjusted))
+
+    new_value = 0.8 * current_cr + 0.2 * adjusted
+    new_value = max(min_val, min(max_val, new_value))
 
     return {
-        "finalValue": current_value,
-        "value_history": value_history,
-        "last_result": last_result,
+        "newValue": round(new_value, 3),
+        "p50_ratio": round(p50, 3),
+        "n_points": len(ratios),
+        "reason": "OK",
     }
+    
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#   CONVENIENCE WRAPPERS FOR ISF, BASAL, CR
-# ═══════════════════════════════════════════════════════════════════════════
 
-def run_autotune_isf_iterations(
-    df_windows: list,
+def run_autotune(
     *,
-    loop_algorithm_inputs: list[dict],
-    pump_isf: float | None = None,
-    isf_current: float | None = None,
-    n_iterations: int = 1,
+    prepared_buckets: list[dict],
+    current_values: dict[str, float],
+    pump_values: dict[str, float],
     cfg: AutotuneConfig = AutotuneConfig(),
-    json_history_list: list[list[dict]] | None = None,
 ) -> dict[str, Any]:
     """
-    Tune ISF (convenience wrapper around run_autotune_parameter_iterations).
-    Returns: finalISF, isf_history, last_result
-    """
-    result = run_autotune_parameter_iterations(
-        df_windows,
-        loop_algorithm_inputs=loop_algorithm_inputs,
-        tuner=get_isf_tuner(),
-        pump_value=pump_isf,
-        current_value=isf_current,
-        n_iterations=n_iterations,
-        cfg=cfg,
-        json_history_list=json_history_list,
-    )
-    return {
-        "finalISF": result["finalValue"],
-        "isf_history": result["value_history"],
-        "last_result": result["last_result"],
+    Expected input:
+
+    current_values = {
+        "ISF": float,
+        "Basal": float,
+        "CR": float,
     }
 
+    pump_values = same structure
 
-def run_autotune_basal_iterations(
-    df_windows: list,
-    *,
-    loop_algorithm_inputs: list[dict],
-    pump_basal: float | None = None,
-    basal_current: float | None = None,
-    n_iterations: int = 1,
-    cfg: AutotuneConfig = AutotuneConfig(),
-    json_history_list: list[list[dict]] | None = None,
-) -> dict[str, Any]:
+    prepared_buckets = list of outputs from prep module
     """
-    Tune basal rate (convenience wrapper).
-    Returns: finalBasal, basal_history, last_result
-    """
-    result = run_autotune_parameter_iterations(
-        df_windows,
-        loop_algorithm_inputs=loop_algorithm_inputs,
-        tuner=get_basal_tuner(),
-        pump_value=pump_basal,
-        current_value=basal_current,
-        n_iterations=n_iterations,
+
+    # collect all data across buckets
+    isf_points = []
+    basal_points = []
+    csf_points = []
+    cr_data = []
+
+    for bucket in prepared_buckets:
+        isf_points.extend(bucket.get("ISFGlucoseData", []))
+        basal_points.extend(bucket.get("basalGlucoseData", []))
+        csf_points.extend(bucket.get("CSFGlucoseData", []))
+        cr_data.extend(bucket.get("CRData", []))
+
+    # ── ISF ─────────────────────────────────
+    isf_result = tune_parameter(
+        param_name="ISF",
+        current_value=current_values["ISF"],
+        pump_value=pump_values["ISF"],
+        glucose_data=isf_points,
         cfg=cfg,
-        json_history_list=json_history_list,
     )
-    return {
-        "finalBasal": result["finalValue"],
-        "basal_history": result["value_history"],
-        "last_result": result["last_result"],
-    }
 
-
-def run_autotune_cr_iterations(
-    df_windows: list,
-    *,
-    loop_algorithm_inputs: list[dict],
-    pump_cr: float | None = None,
-    cr_current: float | None = None,
-    n_iterations: int = 1,
-    cfg: AutotuneConfig = AutotuneConfig(),
-    json_history_list: list[list[dict]] | None = None,
-) -> dict[str, Any]:
-    """
-    Tune carb ratio (convenience wrapper).
-    Returns: finalCR, cr_history, last_result
-    """
-    result = run_autotune_parameter_iterations(
-        df_windows,
-        loop_algorithm_inputs=loop_algorithm_inputs,
-        tuner=get_cr_tuner(),
-        pump_value=pump_cr,
-        current_value=cr_current,
-        n_iterations=n_iterations,
+    # ── BASAL ───────────────────────────────
+    basal_result = tune_parameter(
+        param_name="Basal",
+        current_value=current_values["Basal"],
+        pump_value=pump_values["Basal"],
+        glucose_data=basal_points,
         cfg=cfg,
-        json_history_list=json_history_list,
     )
+    """
+    # ── CR (uses CRData, not CSF!) ──────────
+    cr_result = tune_cr(
+        current_cr=current_values["CR"],
+        pump_cr=pump_values["CR"],
+        cr_data=cr_data,
+        isf=current_values["ISF"],  # important!
+        cfg=cfg,
+    )
+    """
     return {
-        "finalCR": result["finalValue"],
-        "cr_history": result["value_history"],
-        "last_result": result["last_result"],
+        "ISF": isf_result,
+        "Basal": basal_result,
+        #"CR": cr_result,
     }

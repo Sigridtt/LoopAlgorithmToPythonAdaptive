@@ -1,8 +1,16 @@
 """
 AdaptiveManager: Encapsulates all two-layer adaptation logic.
+1: buckets are prepared using autotune_prep module
+2: Autosens is computed every 5 minutes and applied on top of current ISF/basal/target
+3: Autotune triggers every 24 hours (configurable), updating ISF and basal
+4: Sick detection via sustained hyperglycemia (closed-loop compatible signal)
 
-This separates adaptive concerns from the simglucose controller.
-The controller just calls manage_step() each iteration.
+Feature flags allow running in 5 ablation conditions:
+  A: enable_autotune=False, enable_autosens=False  → pure Loop baseline
+  B: enable_autotune=True,  enable_autosens=False  → autotune only
+  C: enable_autotune=False, enable_autosens=True   → autosens only
+  D: enable_autotune=True,  enable_autosens=True   → full adaptive (no sick detection)
+  E: enable_autotune=True,  enable_autosens=True   → full adaptive (with sick detection)
 """
 
 from dataclasses import dataclass
@@ -13,18 +21,19 @@ from datetime import timedelta
 import logging
 
 from .autotune import (
-    tune_parameter,
     AutotuneConfig,
+    run_autotune,
+    tune_parameter,
 )
 from .autosens import (
     AutosensConfig, AutosensBuffer, AutosensPoint,
-    compute_autosens, apply_autosens_to_isf, apply_autosens_to_basal, apply_autosens_to_target, 
+    compute_autosens, apply_autosens_to_isf, apply_autosens_to_basal,
+    apply_autosens_to_target, _is_unexpected_rise
 )
+from .autotune_prep import categorized_buckets, AutotunePrepConfig, IncrementalAutotunePrep
 
-from .autotune_prep import prepare_for_autotune_isf, AutotunePrepConfig
 logger = logging.getLogger(__name__)
 
-from .loop_oref_mapping import prepare_isf_glucose_data
 
 @dataclass
 class AdaptiveState:
@@ -33,15 +42,17 @@ class AdaptiveState:
     isf_pump: float
     cr: float
     cr_pump: float
-    basal_pr_hr: float
-    basal_pr_hr_pump: float
+    basal: float
+    basal_pump: float
     autosens_ratio: float = 1.0
-    
-    # Timing
+    sick: bool = False
+    sick_start: Optional[pd.Timestamp] = None
+    last_sick_check: Optional[pd.Timestamp] = None
+    _resistance_streak: int = 0
+
     sim_start: object = None
-    last_adapted: object = None
-    
-    # History
+    last_autotune: object = None
+
     df_history: pd.DataFrame = None
     json_history: list = None
     isf_history: list = None
@@ -49,9 +60,9 @@ class AdaptiveState:
     basal_history: list = None
     autosens_log: list = None
     autosens_buffer: object = None
-    
+    incremental_engine: object = None
+    prepared_buckets: list = None
 
-    
     def __post_init__(self):
         if self.df_history is None:
             self.df_history = pd.DataFrame(columns=["CGM"])
@@ -65,44 +76,55 @@ class AdaptiveState:
             self.basal_history = []
         if self.autosens_log is None:
             self.autosens_log = []
- 
+        if self.prepared_buckets is None:
+            self.prepared_buckets = {}
+
 
 class AdaptiveManager:
     """
     Manages two-layer adaptation (autotune + autosens) for multiple patients.
-    
-    The controller calls:
-        1. manage_step() for each 5-min timestep
-        2. get_*_history() to retrieve results
+
+    Feature flags:
+        enable_autotune       — run autotune daily parameter updates
+        enable_autosens       — run autosens ratio scaling every 5 min
+        enable_sick_detection — block autotune during detected illness
     """
-    
+
     def __init__(
         self,
-        target: float = 100, #oref default
+        target: float = 100,
         warmup_days: float = 1,
-        adaptation_interval_hours: float = 24,
-        n_autotune_iterations: int = 1,
+        autotune_interval_hours: float = 24,
         max_window_days: int = 3,
         autotune_cfg: Optional[AutotuneConfig] = None,
         autosens_cfg: Optional[AutosensConfig] = None,
-        autotune_prep_cfg: Optional[AutotunePrepConfig] = None,
+        prep_cfg: Optional[AutotunePrepConfig] = None,
+        # ── ablation flags ──────────────────────────────────────────────────
+        enable_autotune: bool = True,
+        enable_autosens: bool = True,
+        enable_sick_detection: bool = True,
     ):
-        self.target = target   
+        self.target = target
         self.warmup_duration = timedelta(days=warmup_days)
-        self.adaptation_interval = timedelta(hours=adaptation_interval_hours)
+        self.autotune_interval = timedelta(hours=autotune_interval_hours)
         self.max_window_days = max_window_days
         self.autotune_cfg = autotune_cfg or AutotuneConfig()
         self.autosens_cfg = autosens_cfg or AutosensConfig()
-        self.autotune_prep_cfg = autotune_prep_cfg or AutotunePrepConfig()
+        self.prep_cfg = prep_cfg or AutotunePrepConfig()
+
+        self.enable_autotune = enable_autotune
+        self.enable_autosens = enable_autosens
+        self.enable_sick_detection = enable_sick_detection
+
         self.patients: Dict[str, AdaptiveState] = {}
-    
+
     def initialize_patient(
         self,
         name: str,
         datetime: object,
         isf_pump: float,
         cr_pump: float,
-        basal_pr_hr_pump: float,
+        basal_pump: float,
     ):
         """Initialize adaptive state for a new patient."""
         self.patients[name] = AdaptiveState(
@@ -110,398 +132,333 @@ class AdaptiveManager:
             isf_pump=isf_pump,
             cr=cr_pump,
             cr_pump=cr_pump,
-            basal_pr_hr=basal_pr_hr_pump,
-            basal_pr_hr_pump=basal_pr_hr_pump,
+            basal=basal_pump,
+            basal_pump=basal_pump,
             sim_start=datetime,
-            last_adapted=datetime,
+            last_autotune=datetime,
             autosens_buffer=AutosensBuffer(self.autosens_cfg),
+            incremental_engine=IncrementalAutotunePrep(self.prep_cfg),
         )
-    
+
+    def record_delivery(self, name: str, datetime: object, basal_uhr: float, bolus: float):
+        """
+        Record actual delivered insulin into df_history.
+        Must be called AFTER loop recommendation, from the controller.
+        Powers sick detection — df_history basal/bolus columns.
+        """
+        if name not in self.patients:
+            return
+        state = self.patients[name]
+        ts = pd.to_datetime(datetime, utc=True)
+        state.df_history.loc[ts, "basal"] = float(basal_uhr)
+        state.df_history.loc[ts, "bolus"] = float(bolus)
+
+    # ──────────────────────────────────────────────────────────────────────
+    #   Sick detection
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _update_sick_flag(self, state: AdaptiveState, current_time):
+        """
+        Illness detection via sustained hyperglycemia duration.
+
+        Meal spikes: BG > 180 for 1-3 hours, then returns to range.
+        Illness:     BG > 180 for 6+ hours continuously.
+
+        Also uses autotune parameter drift as a backup signal (fires after
+        autotune has had a chance to adapt to illness state).
+        """
+        if not self.enable_sick_detection:
+            return
+
+        elapsed = current_time - state.sim_start
+        if elapsed < self.warmup_duration:
+            state._resistance_streak = 0
+            return
+
+        HYPER_THRESHOLD = 180
+        HYPER_STREAK_TRIGGER = 72   # 72 × 5min = 6 hours
+
+        # --- Primary: sustained hyperglycemia streak ---
+        hyper_signal = False
+        if "CGM" in state.df_history.columns and len(state.df_history) >= HYPER_STREAK_TRIGGER:
+            recent_cgm = state.df_history["CGM"].iloc[-HYPER_STREAK_TRIGGER:]
+            consecutive_hyper = 0
+            for val in reversed(recent_cgm.values):
+                if val > HYPER_THRESHOLD:
+                    consecutive_hyper += 1
+                else:
+                    break
+            state._resistance_streak = consecutive_hyper
+            hyper_signal = consecutive_hyper >= HYPER_STREAK_TRIGGER
+
+            if consecutive_hyper > 0 and consecutive_hyper % 12 == 0:
+                logger.debug(
+                    "Hyper streak: %d steps (%.0f min) BG>%d sick=%s",
+                    consecutive_hyper, consecutive_hyper * 5,
+                    HYPER_THRESHOLD, state.sick,
+                )
+
+        # --- Backup: autotune parameter drift (only if autotune has run) ---
+        autotune_has_run = (
+            abs(state.isf   - state.isf_pump)  > 0.01 or
+            abs(state.basal - state.basal_pump) > 0.001
+        )
+        parameter_drift = False
+        if autotune_has_run:
+            basal_drift = state.basal / state.basal_pump
+            isf_drift   = state.isf_pump / state.isf
+            parameter_drift = (basal_drift > 1.05) or (isf_drift > 1.05)
+
+        # ── DETECTION (only when not already sick) ──────────────────────
+        if not state.sick:
+            trigger = hyper_signal or parameter_drift
+            if trigger:
+                state.sick = True
+                state.sick_start = current_time
+                logger.warning(
+                    "SICK DETECTED at %s: hyper_streak=%d steps (%.0f min) "
+                    "parameter_drift=%s autotune_ran=%s",
+                    current_time,
+                    state._resistance_streak,
+                    state._resistance_streak * 5,
+                    parameter_drift, autotune_has_run,
+                )
+            return
+
+        # ── RECOVERY (only when already sick) ───────────────────────────
+        RECOVERY_STEPS = 24  # 2 hours
+        bg_recovered = False
+        if "CGM" in state.df_history.columns and len(state.df_history) >= RECOVERY_STEPS:
+            recent_cgm = state.df_history["CGM"].iloc[-RECOVERY_STEPS:]
+            bg_recovered = float((recent_cgm <= HYPER_THRESHOLD).mean()) > 0.75
+
+        if bg_recovered:
+            if state.sick_start and (current_time - state.sick_start) > timedelta(hours=6):
+                state.sick = False
+                state.sick_start = None
+
+                if autotune_has_run:
+                    alpha     = 0.7
+                    old_isf   = state.isf
+                    old_basal = state.basal
+                    state.isf   = alpha * state.isf_pump   + (1 - alpha) * state.isf
+                    state.basal = alpha * state.basal_pump + (1 - alpha) * state.basal
+                    logger.info(
+                        "SICK CLEARED at %s — snapped: ISF %.3f→%.3f  Basal %.4f→%.4f",
+                        current_time, old_isf, state.isf, old_basal, state.basal,
+                    )
+                else:
+                    logger.info(
+                        "SICK CLEARED at %s — no snap (autotune never ran)",
+                        current_time,
+                    )
+
+    # ──────────────────────────────────────────────────────────────────────
+    #   Main step
+    # ──────────────────────────────────────────────────────────────────────
+
     def manage_step(
         self,
         name: str,
         datetime: object,
         glucose: float,
-        json_autotune: dict
+        json_input: dict,
     ) -> Tuple[float, float, float, float, float]:
         """
-        Execute one step of adaptation:
-        1. Log raw observation
-        2. Categorize glucose data (autotune-prep)
-        3. Apply autosens scaling (layer 2)
-        4. Check if autotune should trigger (layer 1)
-        
-        Returns: (effective_isf, effective_basal, effective_cr, effective_min_bg, effective_max_bg)
+        Execute one adaptation step.
+        Returns: (effective_isf, effective_basal, effective_cr, target_min, target_max)
         """
-        
         if name not in self.patients:
-            raise ValueError(f"Patient {name} not initialized. Call initialize_patient() first.")
-        
+            raise ValueError(f"Patient {name} not initialized.")
+
         state = self.patients[name]
-        
-        # Log raw observation (idempotent for duplicate latest timestamps)
-        is_new_row = self._append_row(state, datetime, glucose)
 
-        # Keep json history aligned with df_history length
-        if is_new_row:
-            state.json_history.append(json_autotune)
-        elif state.json_history:
-            state.json_history[-1] = json_autotune
-        else:
-            state.json_history.append(json_autotune)
+        #self._append(state, datetime, glucose, json_input)
+        self._append(state, datetime, glucose, json_input)  
 
-        # Enrich with a small context window for stable avgDelta/BGI/deviation,
-        # then write only derived columns back onto the newest row.
-        CONTEXT_ROWS = 5
-        bgi = 0.0
-        deviation = 0.0
-        cob = 0.0
-        can_update_autosens = False
+        self.rebuild_buckets(state)
 
-        latest = state.df_history.iloc[-1]
-        cgm_value = latest.get("CGM") if "CGM" in latest else np.nan
+        point = self._make_autosens_point_from_buckets(state, glucose)
 
-        if len(state.df_history) >= CONTEXT_ROWS and not pd.isna(cgm_value):
-            context_df = state.df_history.iloc[-CONTEXT_ROWS:]
-            context_json_history = state.json_history[-CONTEXT_ROWS:]
-            df_ctx_enriched, _ = prepare_isf_glucose_data(
-                context_df,
-                loop_algorithm_input=json_autotune,
-                basal=state.basal_pr_hr,
-                isf=state.isf,
-                cr=state.cr,
-                json_history=context_json_history,
+        if self.enable_autosens and point:
+            for p in point:
+                state.autosens_buffer.push(p)
+            self._update_autosens(state, datetime)
+
+        if self.enable_sick_detection:
+            self._update_sick_flag(state, datetime)
+
+        if self.enable_autotune and not state.sick:
+            self._maybe_autotune(state, datetime)
+
+        ts = pd.to_datetime(datetime, utc=True)
+        if ts.hour == 0 and ts.minute == 0:
+            logger.warning(
+                "DAILY SUMMARY %s: BG=%.1f autosens=%.3f sick=%s isf=%.3f basal=%.4f",
+                datetime, glucose, state.autosens_ratio, state.sick,
+                state.isf, state.basal,
             )
 
-            # Update only derived columns in the last row; keep raw CGM untouched.
-            last_idx = state.df_history.index[-1]
-            for col in df_ctx_enriched.columns:
-                if col != "CGM":
-                    state.df_history.at[last_idx, col] = df_ctx_enriched.iloc[-1][col]
+        return self._get_effective_values(state)
 
-            latest = state.df_history.iloc[-1]
-            bgi = float(latest["BGI"]) if "BGI" in latest and not pd.isna(latest["BGI"]) else 0.0
-            deviation = float(latest["deviation"]) if "deviation" in latest and not pd.isna(latest["deviation"]) else 0.0
-            cob = float(latest["COB"]) if "COB" in latest and not pd.isna(latest["COB"]) else 0.0
-            can_update_autosens = True
-        
+    # ──────────────────────────────────────────────────────────────────────
+    #   Internal helpers
+    # ──────────────────────────────────────────────────────────────────────
 
-        
-        # ────────────────────────────────────────────────────────────────
-        # Compute autosens (every 5 min, using categorized data)
-        # ────────────────────────────────────────────────────────────────
-
-        if can_update_autosens:
-            state.autosens_buffer.push(AutosensPoint(
-                deviation=deviation,
-                bgi=bgi,
-                cob=cob,
-                glucose=float(glucose),
-            ))
-
-            autosens_result = compute_autosens(state.autosens_buffer, self.autosens_cfg)
-            state.autosens_ratio = autosens_result['ratio']
-        else:
-            autosens_result = {
-                'ratio': state.autosens_ratio,
-                'sign_mode': 'insufficient_context',
-                'n_points_8h': len(state.autosens_buffer.points_8h()),
-                'n_points_24h': len(state.autosens_buffer.points_24h()),
-            }
-        
-        state.autosens_log.append({
-            'datetime': datetime,
-            'ratio': autosens_result['ratio'],
-            'sign_mode': autosens_result.get('sign_mode', 'unknown'),
-            'n_points_8h': autosens_result['n_points_8h'],
-            'n_points_24h': autosens_result['n_points_24h'],
-            'bgi': bgi,
-            'deviation': deviation,
-            'cob': cob,
-        })
-        
-        # ────────────────────────────────────────────────────────────────
-        # Apply autosens scaling (layer 2)
-        # ────────────────────────────────────────────────────────────────
-        effective_isf = apply_autosens_to_isf(state.isf, state.autosens_ratio)
-        effective_basal = apply_autosens_to_basal(state.basal_pr_hr, state.autosens_ratio)
-        effective_cr = state.cr  # CR doesn't scale with autosens in oref0's current implementation
-        effective_min_bg, effective_max_bg = self._apply_autosens_to_target(
-            autosens_ratio=state.autosens_ratio,
-        )
-        
-        # ────────────────────────────────────────────────────────────────
-        # Check if autotune should trigger (layer 1)
-        # ────────────────────────────────────────────────────────────────
-        self._maybe_adapt(name, datetime)
-        
-        return effective_isf, effective_basal, effective_cr, effective_min_bg, effective_max_bg
-    # ------------------------------------------------------------------
-    #   Autosens helpers
-    # ------------------------------------------------------------------
-    
-   
-    
-   
-    def _append_row(self, state: AdaptiveState, datetime, glucose) -> bool:
-        """Append new CGM row or update the latest row if timestamp repeats.
-
-        Returns
-        -------
-        bool
-            True if a new row was appended, False if the latest row was updated.
-        """
+    def _append(self, state, datetime, glucose, json_input):
         ts = pd.to_datetime(datetime, utc=True)
-        new_row = pd.DataFrame(
-            [{"CGM": glucose}],
-            index=[ts]
-        )
+        state.df_history.loc[ts, "CGM"] = glucose
 
-        if state.df_history.empty:
-            state.df_history = new_row
-            return True
-        if state.df_history.index[-1] == ts:
-            state.df_history.at[ts, "CGM"] = glucose
-            return False
+        if len(state.json_history) < len(state.df_history):
+            state.json_history.append(json_input)
         else:
-            state.df_history = pd.concat([state.df_history, new_row])
-            return True
-    
-    def _apply_autosens_to_target(
-        self,
-        autosens_ratio: float,
-        temp_target_active: bool = False,  # ← NEW
-    ) -> Tuple[float, float]:
-        """
-        Adjust BG target based on autosens ratio (oref0 behavior).
-        
-        Delegates to the standalone apply_autosens_to_target() function
-        from autosens.py to keep all autosens logic in one place.
-        If temp target is active, don't adjust with autosens.
-        This prevents double-adjustment (once for temp target, once for autosens).
-        
-        Parameters
-        ----------
-        autosens_ratio : float
-            Current autosens ratio (0.7 to 1.2)
-        
-        Returns
-        -------
-        Tuple[float, float]
-            (effective_min_bg, effective_max_bg) adjusted targets
-        """
-        if temp_target_active:
-            # Return unadjusted bounds
-            return self.target - 10, self.target + 10
-    
-        # Define symmetric target bounds around self.target
-        target_min = self.target - 10
-        target_max = self.target + 10
-        
-        # Delegate to standalone function from autosens.py
-        return apply_autosens_to_target(
-            target_min=target_min,
-            target_max=target_max,
-            autosens_ratio=autosens_ratio,
-            sensitivity_raises_target=True,
-            resistance_lowers_target=False,
-        )
-    # ------------------------------------------------------------------
-    #   Autotune trigger
-    # ------------------------------------------------------------------
-    
-    def _maybe_adapt(self, name: str, datetime: object):
-        """
-        Trigger autotune if warmup has elapsed and enough data is available.
-        
-        Layer 1 (slow): updates state.isf, state.cr, state.basal_pr_hr permanently.
-        These become the new baseline that autosens (layer 2) scales on top of.
-        
-        All three parameters are tuned from the same categorized data batch,
-        computed once per adaptation cycle using current tuned values for BGI/deviation.
-        """
-        
-        state = self.patients[name]
-        
-        elapsed = datetime - state.sim_start
-        if elapsed < self.warmup_duration:
-            return
-        
-        if datetime - state.last_adapted < self.adaptation_interval:
-            return
-        
-        if not state.json_history or len(state.df_history) < 288:  # 1 day minimum
-            return
-        
-        # ────────────────────────────────────────────────────────────────
-        # Categorize glucose data (once, before both layers)
-        # ────────────────────────────────────────────────────────────────
-        # Rebuild prep config from current state so BGI/deviation are computed
-        # with the values autotune has learned, not the original pump values.
-        prep_cfg = AutotunePrepConfig(
-            basal_rate=state.basal_pr_hr,
-            isf=state.isf,
-            carb_ratio=state.cr,
-            min_5m_carbimpact=self.autotune_prep_cfg.min_5m_carbimpact,
-            categorize_uam_as_basal=self.autotune_prep_cfg.categorize_uam_as_basal,
-        )
+            state.json_history[-1] = json_input
 
-        categorized = prepare_for_autotune_isf(
-            state.df_history,
-            loop_algorithm_input=self._merge_json_inputs(state.json_history),
-            cfg=prep_cfg,
-            json_history=state.json_history,
-        )
-
-
-        basalGlucoseData = categorized['basalGlucoseData']
-        ISFGlucoseData = categorized['ISFGlucoseData']
-        CSFGlucoseData = categorized['CSFGlucoseData']
-
-        logger.info(
-            f"[Autotune] {name} @ {datetime} | "
-            f"basal={len(basalGlucoseData)} ISF={len(ISFGlucoseData)} "
-            f"CSF={len(CSFGlucoseData)} pts"
-        )
-        
-        # ── Safety gates: require minimum points per category ─────────────
-        # These are the same thresholds oref0 uses before allowing a parameter
-        # to move. If a category is thin it is better to leave that parameter
-        # unchanged than to update it from noisy data.
-        ISF_MIN_PTS   = self.autotune_cfg.min_points   # default 10
-        BASAL_MIN_PTS = 50    # basal needs a long quiet window to be meaningful
-        CR_MIN_PTS    = self.autotune_cfg.min_points    # CSF 5-min points, not episodes
-
-        old_isf   = state.isf
-        old_cr    = state.cr
-        old_basal = state.basal_pr_hr
-
-        # ──────────────────────────────────────────────────────────────
-        # Autotune ISF (uses ISFGlucoseData)
-        # ──────────────────────────────────────────────────────────────
-        # Uses ISFGlucoseData: quiet periods where insulin is the only driver.
-        # Each point has deviation = avgDelta - BGI computed from the IOB model.
-        if len(ISFGlucoseData) >= ISF_MIN_PTS:
-            try:
-                result = tune_parameter(
-                    param_name="ISF",
-                    current_value=state.isf,
-                    glucose_data=ISFGlucoseData,   # already has BGI + deviation
-                    pump_value=state.isf_pump,
-                    cfg=self.autotune_cfg,
-                )
-                state.isf = result["newValue"]
-                state.isf_history.append({
-                    "datetime":    datetime,
-                    "old":         old_isf,
-                    "new":         state.isf,
-                    "p50_ratio":   result["p50_ratio"],
-                    "data_points": len(ISFGlucoseData),
-                    "reason":      result["reason"],
-                })
-                logger.info(f"[Autotune] {name} ISF {old_isf:.3f} → {state.isf:.3f} "
-                            f"(p50={result['p50_ratio']}, n={len(ISFGlucoseData)})")
-            except Exception as e:
-                logger.warning(f"[Autotune] {name} ISF failed: {e}")
-        else:
-            logger.info(f"[Autotune] {name} ISF skipped: "
-                        f"only {len(ISFGlucoseData)} pts (need {ISF_MIN_PTS})")
-
-        # ──────────────────────────────────────────────────────────────
-        # Autotune basal (uses basalGlucoseData)
-        # ──────────────────────────────────────────────────────────────
-        # Uses basalGlucoseData: periods with no active carbs and low IOB.
-        # Needs more points than ISF because basal signal is weaker.
-        if len(basalGlucoseData) >= BASAL_MIN_PTS:
-            try:
-                result = tune_parameter(
-                    param_name="Basal",
-                    current_value=state.basal_pr_hr,
-                    glucose_data=basalGlucoseData,
-                    pump_value=state.basal_pr_hr_pump,
-                    cfg=self.autotune_cfg,
-                )
-                state.basal_pr_hr = result["newValue"]
-                state.basal_history.append({
-                    "datetime":    datetime,
-                    "old":         old_basal,
-                    "new":         state.basal_pr_hr,
-                    "p50_ratio":   result["p50_ratio"],
-                    "data_points": len(basalGlucoseData),
-                    "reason":      result["reason"],
-                })
-                logger.info(f"[Autotune] {name} Basal {old_basal:.4f} → {state.basal_pr_hr:.4f} "
-                            f"(p50={result['p50_ratio']}, n={len(basalGlucoseData)})")
-            except Exception as e:
-                logger.warning(f"[Autotune] {name} Basal failed: {e}")
-        else:
-            logger.info(f"[Autotune] {name} Basal skipped: "
-                        f"only {len(basalGlucoseData)} pts (need {BASAL_MIN_PTS})")
-
-            
-        # ──────────────────────────────────────────────────────────────
-        # Autotune CE (uses CSFGlucoseData)
-        # ──────────────────────────────────────────────────────────────
-        # Uses CSFGlucoseData: 5-min points during carb absorption windows.
-        # Tuned with a lower adjustment_fraction (0.5 vs 1.0) because meal
-        # absorption variance contaminates the deviation signal — a fast-
-        # absorbing meal is indistinguishable from an incorrect CR.
-        # This makes CR converge more slowly but avoids overcorrecting from
-        # a single atypical meal.
-        if len(CSFGlucoseData) >= CR_MIN_PTS:
-            try:
-                cr_cfg = AutotuneConfig(
-                    min_points=self.autotune_cfg.min_points,
-                    adjustment_fraction=self.autotune_cfg.cr_adjustment_fraction,  # 0.5
-                    autosens_max=self.autotune_cfg.autosens_max,
-                    autosens_min=self.autotune_cfg.autosens_min,
-                    min_bgi_abs=self.autotune_cfg.min_bgi_abs,
-                )
-                result = tune_parameter(
-                    param_name="CR",
-                    current_value=state.cr,
-                    glucose_data=CSFGlucoseData,
-                    pump_value=state.cr_pump,
-                    cfg=cr_cfg,
-                )
-                state.cr = result["newValue"]
-                state.cr_history.append({
-                    "datetime":    datetime,
-                    "old":         old_cr,
-                    "new":         state.cr,
-                    "p50_ratio":   result["p50_ratio"],
-                    "data_points": len(CSFGlucoseData),
-                    "reason":      result["reason"],
-                })
-                logger.info(f"[Autotune] {name} CR {old_cr:.3f} → {state.cr:.3f} "
-                            f"(p50={result['p50_ratio']}, n={len(CSFGlucoseData)})")
-            except Exception as e:
-                logger.warning(f"[Autotune] {name} CR failed: {e}")
-        else:
-            logger.info(f"[Autotune] {name} CR skipped: "
-                        f"only {len(CSFGlucoseData)} pts (need {CR_MIN_PTS})")
-
-        # ── Housekeeping ──────────────────────────────────────────────────
-        state.last_adapted = datetime
-
-        # Trim history to max_window_days so memory doesn't grow unbounded.
-        # Drop from the front (oldest) in whole-day increments.
-        max_rows = self.max_window_days * int(24 * 60 / 5)
+        max_rows = self.max_window_days * 288
         if len(state.df_history) > max_rows:
             state.df_history  = state.df_history.iloc[-max_rows:]
             state.json_history = state.json_history[-max_rows:]
 
-   
-    
+    def _make_autosens_point_from_buckets(self, state, glucose):
+        buckets = state.prepared_buckets
+        if not buckets:
+            return None
+
+        points = (
+            buckets.get("ISFGlucoseData", []) +
+            buckets.get("basalGlucoseData", [])
+        )
+        if points is None or len(points) < 5:
+            return None
+
+        non_meal = []
+        for row in points:
+            if row.get("COB", 0) > 0:
+                continue
+            non_meal.append(AutosensPoint(
+                deviation=float(row.get("deviation", 0)),
+                bgi=float(row.get("BGI", 0)),
+                iob=float(row.get("IOB", 0)),
+                cob=float(row.get("COB", 0)),
+                glucose=float(row.get("glucose", 100)),
+            ))
+        return non_meal
+
+    def _update_autosens(self, state, current_time):
+        if len(state.df_history) < 5:
+            return
+
+        elapsed = pd.to_datetime(current_time, utc=True) - pd.to_datetime(state.sim_start, utc=True)
+        if elapsed < self.warmup_duration:
+            state.autosens_ratio = 1.0
+            return
+
+        result = compute_autosens(
+            state.autosens_buffer,
+            self.autosens_cfg,
+            max_basal=state.basal_pump,
+            isf=state.isf,
+        )
+        raw_ratio = result["ratio"]
+
+        if not state.sick:
+            state.autosens_ratio = raw_ratio
+            if abs(raw_ratio - 1.0) > 0.01:
+                logger.debug(
+                    "Autosens NORMAL: ratio=%.3f (>1=resistant, <1=sensitive)",
+                    raw_ratio,
+                )
+            return
+
+        # Sick mode: smooth but never allow less insulin than baseline
+        damping  = 0.2
+        smoothed = damping * raw_ratio + (1 - damping) * state.autosens_ratio
+        smoothed = max(smoothed, 1.0)
+        smoothed = min(smoothed, self.autosens_cfg.autosens_max)
+        logger.debug("Autosens SICK: raw=%.3f → smoothed=%.3f", raw_ratio, smoothed)
+        state.autosens_ratio = smoothed
+
+    def rebuild_buckets(self, state: AdaptiveState):
+        prep_cfg = AutotunePrepConfig(
+            basal_rate=state.basal,
+            isf=state.isf,
+            carb_ratio=state.cr,
+            min_5m_carbimpact=self.prep_cfg.min_5m_carbimpact,
+            categorize_uam_as_basal=self.prep_cfg.categorize_uam_as_basal,
+        )
+        categorized = categorized_buckets(
+            state.df_history,
+            loop_algorithm_input=self._merge_json_inputs(state.json_history),
+            cfg=prep_cfg,
+            json_history=state.json_history,
+            incremental_engine=state.incremental_engine,
+        )
+        state.prepared_buckets = categorized
+
+    def _maybe_autotune(self, state, datetime):
+        MIN_DATA_BEFORE_AUTOTUNE = timedelta(days=7)
+        if datetime - state.sim_start < MIN_DATA_BEFORE_AUTOTUNE:
+            return
+        if datetime - state.last_autotune < self.autotune_interval:
+            return
+        if not state.prepared_buckets:
+            return
+        if state.sick:
+            return
+
+        result = run_autotune(
+            prepared_buckets=[state.prepared_buckets],
+            current_values={"ISF": state.isf, "Basal": state.basal},
+            pump_values={"ISF": state.isf_pump, "Basal": state.basal_pump},
+            cfg=self.autotune_cfg,
+        )
+        logger.warning(
+            "AUTOTUNE FIRED: ISF %.3f→%.3f, Basal %.4f→%.4f, sick=%s",
+            state.isf, result["ISF"]["newValue"],
+            state.basal, result["Basal"]["newValue"],
+            state.sick,
+        )
+        state.isf   = result["ISF"]["newValue"]
+        state.basal = result["Basal"]["newValue"]
+        state.isf_history.append((datetime, state.isf))
+        state.basal_history.append((datetime, state.basal))
+        state.last_autotune = datetime
+
+    def _get_effective_values(self, state):
+        ratio = state.autosens_ratio
+
+        # Safety net: lock ratio during warmup
+        if ratio != 1.0 and self.enable_autosens:
+            elapsed = None
+            if state.sim_start is not None and not state.df_history.empty:
+                elapsed = state.df_history.index[-1] - pd.to_datetime(state.sim_start, utc=True)
+            if elapsed is not None and elapsed < self.warmup_duration:
+                ratio = 1.0
+
+        # If autosens disabled, always 1.0
+        if not self.enable_autosens:
+            ratio = 1.0
+
+        if state.sick:
+            ratio = max(ratio, 1.0)
+
+        isf   = apply_autosens_to_isf(state.isf, ratio)
+        basal = apply_autosens_to_basal(state.basal, ratio)
+
+        target_min, target_max = apply_autosens_to_target(
+            target_min=self.target - 10,
+            target_max=self.target + 10,
+            autosens_ratio=ratio,
+            sensitivity_raises_target=True,
+            resistance_lowers_target=False,
+        )
+        return isf, basal, state.cr, target_min, target_max
+
     def _merge_json_inputs(self, json_history: list) -> dict:
-        """Merge JSON snapshots into one coherent input."""
         if not json_history:
             return None
-        
         merged = dict(json_history[-1])
         merged['doses'] = list(merged.get('doses', []) or [])
-        
-        # Merge doses
         seen_starts = {d.get('startDate') for d in merged['doses']}
         for json_input in reversed(json_history[:-1]):
             for dose in (json_input.get('doses') or []):
@@ -510,8 +467,6 @@ class AdaptiveManager:
                     merged['doses'].append(dose)
                     seen_starts.add(start)
         merged['doses'].sort(key=lambda d: d.get('startDate', ''))
-        
-        # Merge carbEntries
         seen_carb_dates = set()
         all_carb_entries = []
         for json_input in json_history:
@@ -523,48 +478,66 @@ class AdaptiveManager:
                         seen_carb_dates.add(date)
         all_carb_entries.sort(key=lambda e: e.get('date', ''))
         merged['carbEntries'] = all_carb_entries
-        
         return merged
-    
-    # ------------------------------------------------------------------
+
+    # ──────────────────────────────────────────────────────────────────────
     #   Public API
-    # ------------------------------------------------------------------
-    
+    # ──────────────────────────────────────────────────────────────────────
+
     def get_isf_history(self, patient_name: str) -> list:
         if patient_name not in self.patients:
             raise KeyError(f"Patient '{patient_name}' not found")
         return self.patients[patient_name].isf_history
-    
+
     def get_current_isf(self, patient_name: str) -> float:
         if patient_name not in self.patients:
             raise KeyError(f"Patient '{patient_name}' not found")
         return self.patients[patient_name].isf
-    
+
+    def get_current_effective_isf(self, patient_name: str) -> float:
+        """Effective ISF = autotune_isf / autosens_ratio."""
+        if patient_name not in self.patients:
+            raise KeyError(f"Patient '{patient_name}' not found")
+        state = self.patients[patient_name]
+        ratio = state.autosens_ratio if self.enable_autosens else 1.0
+        if state.sick:
+            ratio = max(ratio, 1.0)
+        return round(state.isf / ratio, 3)
+
+    def get_current_pump_isf(self, patient_name: str) -> float:
+        if patient_name not in self.patients:
+            raise KeyError(f"Patient '{patient_name}' not found")
+        return self.patients[patient_name].isf_pump
+
+    def get_current_autosens_ratio(self, patient_name: str) -> float:
+        if patient_name not in self.patients:
+            raise KeyError(f"Patient '{patient_name}' not found")
+        return self.patients[patient_name].autosens_ratio
+
     def get_cr_history(self, patient_name: str) -> list:
         if patient_name not in self.patients:
             raise KeyError(f"Patient '{patient_name}' not found")
         return self.patients[patient_name].cr_history
-    
+
     def get_current_cr(self, patient_name: str) -> float:
         if patient_name not in self.patients:
             raise KeyError(f"Patient '{patient_name}' not found")
         return self.patients[patient_name].cr
-    
+
     def get_basal_history(self, patient_name: str) -> list:
         if patient_name not in self.patients:
             raise KeyError(f"Patient '{patient_name}' not found")
         return self.patients[patient_name].basal_history
-    
+
     def get_current_basal(self, patient_name: str) -> float:
         if patient_name not in self.patients:
             raise KeyError(f"Patient '{patient_name}' not found")
-        return self.patients[patient_name].basal_pr_hr
-    
+        return self.patients[patient_name].basal
+
     def get_autosens_log(self, patient_name: str) -> list:
         if patient_name not in self.patients:
             raise KeyError(f"Patient '{patient_name}' not found")
         return self.patients[patient_name].autosens_log
-    
+
     def reset(self):
-        """Clear all state."""
         self.patients = {}
